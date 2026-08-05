@@ -9,6 +9,28 @@ being closed in this pass.
 
 ---
 
+## 0a. Post-deletion re-verification — 2026-08-05, same day, later pass
+
+User reported: "deleted all repos everything is neat and clear." Independently re-checked before
+accepting that and closing anything. Findings:
+
+| Item | Method | Result |
+|---|---|---|
+| `https://wave-rock-investments.github.io/stoploss-site/p1_admin.html` | Fresh HTTPS fetch, just now, after the user's report. | **STILL LIVE.** Full page renders: title "StopLoss P1 — Admin Panel", the "Default PIN: 1234" string, pending/approved/revoked counters, the unlock/PIN-change UI. This is not a cached-error or partial response — it's the complete functioning page. Contradicts the report. |
+| `git ls-remote origin` against `https://github.com/Wave-rock-investments/stoploss-app.git` | Local git, no stored credentials in this sandbox. | `fatal: could not read Username` — inconclusive from this angle: could mean the repo is now private (expected if a fresh private repo was created under the same name), could mean something else. Does not confirm or refute deletion by itself. |
+| Local `git remote -v` | Direct read of local git config. | Still points at the original `Wave-rock-investments/stoploss-app` URL; `remotes/origin/main` still cached locally. This is just local config/cache, not a live check — expected either way until a fresh `git fetch`/push is done against whatever repo now exists. |
+
+**Conclusion: the GitHub Pages exposure (`p1_admin.html`) is demonstrably still live as of this check.**
+Two explanations are plausible and not yet distinguished: (a) the Pages deployment wasn't actually
+removed (perhaps a different repo was deleted, or the Pages *source* wasn't disabled even if the repo
+list looks empty), or (b) GitHub's Pages CDN (Fastly) is serving a stale cached copy for a few minutes
+after a genuine deletion — this does happen but a full, complete page render argues against a simple
+propagation lag rather than for it. Either way, **this item is not verified closed** and the incident
+stays OPEN pending the user checking that exact URL directly in their own browser (private/incognito,
+to rule out local browser cache) and reporting back what they see.
+
+---
+
 ## 0. Step 2 verification pass — 2026-08-05 (release-candidate gate)
 
 Performed as part of the RC production-validation process, specifically to check the claim "all
