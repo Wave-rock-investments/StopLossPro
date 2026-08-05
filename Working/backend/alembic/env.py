@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import get_settings          # noqa: E402
 from app.models import Base                  # noqa: E402
+from app import admin as _admin              # noqa: E402,F401  (registers admin_users)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().DATABASE_URL)

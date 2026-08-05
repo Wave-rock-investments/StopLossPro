@@ -86,6 +86,9 @@ python -m PyInstaller --onefile --windowed ^
   --collect-submodules numpy ^
   --exclude-module matplotlib ^
   --exclude-module pandas ^
+  --exclude-module pytest ^
+  --exclude-module tests ^
+  --noupx ^
   --noconfirm ^
   "Product Sell.py"
 

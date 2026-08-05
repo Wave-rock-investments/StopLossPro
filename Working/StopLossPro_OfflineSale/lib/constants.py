@@ -127,27 +127,24 @@ _KV_NUMPAD_BAR  = 38    # dp — collapsed numpad bar height
 _KV_MIN_TOUCH   = 48    # dp — Android minimum touch target
 _RATE_LIMIT_TG  = 3.0   # s  — minimum seconds between TG posts
 
-# ── Licence / activation endpoints & local paths ──────────────────────────────
-_NOTIFY_URL  = "https://ntfy.sh/stoploss_dev_h7zltndg"   # install alerts (never filled by heartbeats)
-_HB_URL      = "https://ntfy.sh/stoploss_hb_h7zltndg"    # heartbeats — separate topic to protect install history
-_APPROVE_URL = "https://gist.githubusercontent.com/Wave-rock-investments/8a8b52dc14c0ecca38121df01557ec99/raw/approved_ids.txt"
-# V2 SaaS: update _LINK_URL to your Netlify site after first deploy
-# e.g. "https://stoploss-checkout.netlify.app/.netlify/functions/link"
-_LINK_URL        = "https://stoplosspro.in/.netlify/functions/link"
-# Cloudflare Worker proxy — receives Gist PATCH requests from client EXEs and
-# forwards them to GitHub API using a PAT stored in CF environment variables.
-# Deploy: see docs/cf_worker/gist_proxy.js.  Never embed a GitHub PAT in EXE code.
-_GIST_PROXY_URL  = "https://stoploss-gist-proxy.bubbleai1904.workers.dev"
-# Single-active-session enforcement — one line per machine ID: "MID:TOKEN:UNIX_TS"
-_SESSIONS_URL       = "https://gist.githubusercontent.com/Wave-rock-investments/8a8b52dc14c0ecca38121df01557ec99/raw/active_sessions.txt"
-_SESSION_HB_INTERVAL = 60   # seconds between session-claim refreshes
+# ── Licensing ─────────────────────────────────────────────────────────────────
+# PHASE 12: every endpoint that previously lived here has been deleted.
+#
+#   _NOTIFY_URL / _HB_URL      public ntfy topics — published customer MT5 login,
+#                              balance, equity, open positions and GPS to a
+#                              world-readable URL, and accepted APPROVED/REVOKE
+#                              from anyone who knew the topic name
+#   _APPROVE_URL               Gist allowlist — client-side licence state
+#   _SESSIONS_URL              Gist session file — shared across P1/P2/StopLossPro
+#   _GIST_PROXY_URL            Cloudflare Worker — authenticated writes on a
+#                              User-Agent prefix, i.e. not at all
+#   _LINK_URL                  unused checkout stub
+#   _LIC_CACHE / _GPS_CACHE    plaintext, user-writable local state
+#   _CACHED_COORDS             in-memory GPS cache
+#
+# Licensing now lives in lib/licensing.py and talks to an authenticated API.
+# The server is authoritative; this client cannot grant itself anything.
+# Session state is sealed with Windows DPAPI, not written as plaintext.
 
-_REG_FILE  = os.path.join(os.path.expanduser("~"), ".slcalc_reg")
-_LIC_CACHE = os.path.join(os.path.expanduser("~"), ".slcalc_cache")
-_GPS_CACHE = os.path.join(os.path.expanduser("~"), ".slcalc_gps")
-_CACHE_TTL = 1800   # approval cache: 30 min
-_GPS_TTL   = 86400  # gps cache: 24 hours
-
-# In-memory coords cache — populated by _collect_system_info, reused by _send_heartbeat
-_CACHED_COORDS = {'loc': '', 'src': 'IP'}  # {'loc': 'lat,lon', 'src': 'GPS'|'IP'}
+_REG_FILE = os.path.join(os.path.expanduser("~"), ".slcalc_reg")   # legacy marker only
 

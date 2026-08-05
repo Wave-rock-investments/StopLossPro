@@ -57,7 +57,6 @@ from constants import (
     MAX_LOT, MAX_HIST, STORE_FILE,
     _get_dp, _base_sym,
     _MT5_OK, MT5_ORDER_TYPE_LABELS,
-    _LIC_CACHE,                        # used by _bg_check_revoked
 )
 from mt5_api    import (    # explicit — no wildcard pollution
     mt5_check_status, mt5_place_order, mt5_fetch_candle,
@@ -67,9 +66,7 @@ from mt5_api    import (    # explicit — no wildcard pollution
 from calc       import TradeSetup, calc_setup, calc_auto_lot, recommend_order_type
 from activation import (
     _show_activation_blocker, _register_if_new, _is_activated,
-    _get_machine_id,         # required by _bg_check_revoked (machine fingerprint)
-    _start_revoke_listener, _send_heartbeat,
-    _start_session_heartbeat,   # single-active-session enforcement
+    _start_session_heartbeat,   # authenticated licence heartbeat (PHASE 12)
 )
 
 # ── Widget classes (must be imported so KV can reference them) ────────────────
@@ -323,64 +320,15 @@ class StopLossApp(MDApp):
         return True   # CRITICAL: tell Android to keep us alive
 
     def on_start(self):
-        """Start background approval refresh + instant-revoke listener."""
-        from kivy.clock import Clock as _Clock
-        # Run immediately on start (catches revoke that happened while app was closed)
-        self._bg_check_revoked(None)
-        _Clock.schedule_interval(self._bg_check_revoked, 300)
-        _start_revoke_listener()
-        _start_session_heartbeat()
-        threading.Thread(target=_send_heartbeat, daemon=True).start()
+        """Start the authenticated licence heartbeat.
 
-    def _bg_check_revoked(self, dt):
-        """Every 5 min (+ once immediately on start): send heartbeat (shows Online
-        in dashboard) + refresh approval cache.
-
-        Reads the approved list via the Gist API (api.github.com), not the
-        gist.githubusercontent.com raw-content CDN — the raw CDN can lag several
-        seconds to minutes behind the latest approved_ids.txt after a write
-        (Fastly edge propagation), and a false "not approved" read here would
-        silently kill a legitimately-approved customer's session with no error
-        shown. A second confirm-read after a short delay guards against any
-        remaining transient blip before we ever call self.stop() over this.
-        The instant, authoritative revoke path is still _start_revoke_listener()
-        (ntfy push) — this periodic check is just a backstop, so it should never
-        be trigger-happy.
+        PHASE 12: the previous startup path also began polling a public ntfy
+        topic for REVOKE messages and posted MT5 account data to another public
+        topic. Both are gone. Revocation now arrives over the authenticated
+        heartbeat inside LicensingProvider, and nothing about the customer's
+        trading account leaves this machine.
         """
-        def _run():
-            _send_heartbeat()
-            try:
-                import urllib.request as _ur, json as _json, time as _t
-                _GIST_ID  = '8a8b52dc14c0ecca38121df01557ec99'
-                _GIST_API = f'https://api.github.com/gists/{_GIST_ID}'
-
-                def _fetch_approved():
-                    req = _ur.Request(_GIST_API, headers={'User-Agent': 'StopLossCalc/2'})
-                    with _ur.urlopen(req, timeout=6) as r:
-                        gist = _json.loads(r.read())
-                    return (gist.get('files', {}).get('approved_ids.txt', {}) or {}).get('content', '') or ''
-
-                content = _fetch_approved()
-                with open(_LIC_CACHE, 'w') as f:
-                    f.write(f"{int(_t.time())}:{content}")
-                mid = _get_machine_id()
-                approved = {ln.strip().upper() for ln in content.splitlines() if ln.strip()}
-                log.debug("[REVOKE_CHECK] mid=%s approved_count=%d in_list=%s", mid, len(approved), mid in approved)
-                if mid not in approved:
-                    # Re-verify once before taking the drastic step of killing the
-                    # customer's session — rules out a one-off stale/partial read.
-                    log.debug("[REVOKE_CHECK] mid not in approved list — re-verifying in 5s")
-                    _t.sleep(5)
-                    content2  = _fetch_approved()
-                    approved2 = {ln.strip().upper() for ln in content2.splitlines() if ln.strip()}
-                    log.debug("[REVOKE_CHECK] re-verify — approved_count=%d in_list=%s", len(approved2), mid in approved2)
-                    if mid not in approved2:
-                        log.warning("[REVOKE_CHECK] mid=%s confirmed NOT approved — stopping app", mid)
-                        from kivy.clock import Clock as _Clock
-                        _Clock.schedule_once(lambda _dt: self.stop(), 0)
-            except Exception as _e:
-                log.debug("[REVOKE_CHECK] exception: %s", _e)
-        threading.Thread(target=_run, daemon=True).start()
+        _start_session_heartbeat()
 
     def on_resume(self):
         """Android: re-sync UI after returning from background.

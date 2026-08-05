@@ -63,6 +63,7 @@ def test_all_seven_entities_present():
     expected = {
         "users", "licences", "devices", "sessions",
         "mfa_credentials", "recovery_codes", "consent_records", "audit_events",
+        "admin_users",
     }
     assert expected == set(Base.metadata.tables.keys())
 

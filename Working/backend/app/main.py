@@ -57,6 +57,13 @@ def _startup_guard() -> None:
              "sqlite" if settings.is_sqlite else "postgresql")
 
 
+from app import admin as admin_module  # noqa: E402
+from app.api import router as api_router  # noqa: E402
+
+app.include_router(api_router, prefix=settings.API_PREFIX)
+app.include_router(admin_module.router)
+
+
 @app.get("/health", tags=["ops"])
 def health() -> dict:
     """Liveness. Deliberately reveals nothing about internals."""

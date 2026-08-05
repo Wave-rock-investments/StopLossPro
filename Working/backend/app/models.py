@@ -143,6 +143,10 @@ class Licence(Base):
 
     max_concurrent_sessions: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
+    # Comma-separated feature keys. Centralised here rather than scattered as
+    # booleans through the client, so future plans (BASIC/PRO) need no redesign.
+    entitlements: Mapped[str] = mapped_column(String(500), default="risk_engine", nullable=False)
+
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
@@ -245,6 +249,11 @@ class AppSession(Base):
         default=SessionStatus.ACTIVE,
         nullable=False,
     )
+
+    # SHA-256 of the opaque session token. The plaintext is returned to the
+    # client once and never stored, so a database read yields no usable
+    # credential.
+    token_hash: Mapped[str | None] = mapped_column(String(64), index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     last_heartbeat_at: Mapped[datetime] = mapped_column(
