@@ -49,7 +49,11 @@ _STATE_DIR = os.path.join(os.path.expanduser("~"), ".stoplosspro")
 _STATE_FILE = os.path.join(_STATE_DIR, "state.bin")
 
 DEFAULT_HEARTBEAT = 90
-DEFAULT_GRACE = 72 * 3600
+# 24h — matches server OFFLINE_GRACE_SECONDS (app/config.py). Used only until the
+# first successful login/heartbeat, which then overwrites this from the server's
+# live "offline_grace_seconds" field — so this constant only matters for the
+# very first offline gap before any server contact has happened.
+DEFAULT_GRACE = 24 * 3600
 
 
 # ══════════════════════════════════════════════════════════════════════════

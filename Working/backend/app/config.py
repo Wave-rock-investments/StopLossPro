@@ -53,7 +53,12 @@ class Settings(BaseSettings):
     # ── Token / session policy ─────────────────────────────────────────────
     GRANT_TTL_SECONDS: int = 180        # short-lived signed authorization grant
     HEARTBEAT_INTERVAL_SECONDS: int = 90
-    OFFLINE_GRACE_SECONDS: int = 259200  # 72h bounded offline tolerance
+    # 24h bounded offline tolerance. Was 72h; reduced 2026-08-05 per the tradeoff
+    # analysis in docs/OFFLINE_GRACE_ANALYSIS.md — caps the worst-case window an
+    # admin revocation can go unnoticed by an offline device at one day instead
+    # of three, while still covering the realistic offline cases (an overnight,
+    # a travel day, a bad-ISP day) that matter for this customer base.
+    OFFLINE_GRACE_SECONDS: int = 86400
     SESSION_IDLE_TIMEOUT_SECONDS: int = 900  # sweeper reclaims dead sessions
 
     # ── Auth policy ────────────────────────────────────────────────────────

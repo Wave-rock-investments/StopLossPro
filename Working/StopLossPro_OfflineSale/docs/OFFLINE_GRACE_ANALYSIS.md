@@ -1,8 +1,11 @@
 # Offline Grace Window — Behavior Analysis & Recommendation
 
-**Status:** ANALYSIS ONLY. `STOPLOSS_OFFLINE_GRACE_SECONDS` / `DEFAULT_GRACE`
-remain at **72h (259200s)**, unchanged, pending your decision. Nothing in
-this document has been applied to code.
+**Status: DECIDED AND APPLIED, 2026-08-05.** Per the recommendation in §3 below,
+`STOPLOSS_OFFLINE_GRACE_SECONDS` / `DEFAULT_GRACE` were changed from 72h (259200s)
+to **24h (86400s)** in `app/config.py`, `lib/licensing.py`, and `.env.example`,
+with a pinned regression test (`test_offline_grace_is_24_hours`) so the value
+can't silently drift back. The analysis below is left as originally written —
+it's the record of *why* 24h, not just a historical note.
 
 **Where the value lives:** server `app/config.py` `OFFLINE_GRACE_SECONDS`
 (sent to the client on every login/heartbeat as `offline_grace_seconds`,

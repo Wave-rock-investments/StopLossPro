@@ -294,6 +294,16 @@ def test_no_secret_defaults_in_config():
     assert s.SIGNING_PUBLIC_KEY_B64 == ""
 
 
+def test_offline_grace_is_24_hours():
+    """Pinned regression: decided 2026-08-05 to reduce from 72h to 24h (see
+    docs/OFFLINE_GRACE_ANALYSIS.md). This must not silently drift back — if it
+    needs to change again, that's a deliberate decision, not an accident, and
+    this test should be updated alongside that decision, not around it."""
+    from app.config import Settings
+
+    assert Settings().OFFLINE_GRACE_SECONDS == 86400
+
+
 # ── signing keys ───────────────────────────────────────────────────────────
 def test_keygen_produces_usable_ed25519_pair():
     import base64
