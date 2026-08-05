@@ -1,11 +1,27 @@
 # Credential Exposure Incident — 2026-08-05
 
-**Status:** **OPEN.** Working tree contained and independently re-verified clean. Token/gist
-revocation confirmed by user. Two remote-cleanup items remain outstanding and are independently
-**confirmed still open** as of the Step 2 release-gate verification below — this incident is not
-being closed in this pass.
-**Severity:** Critical.
+**Status:** **CLOSED, 2026-08-05.** All items below independently verified, not just accepted on
+report. See §0b for the closing verification.
+**Severity:** Critical (at discovery). Residual risk at closure: none identified.
 **Discovered:** During the Phase 0 pre-commit secret scan of the Security MVP implementation.
+
+## 0b. Closure verification — 2026-08-05, final pass
+
+| Item | Evidence |
+|---|---|
+| PAT-A, PAT-B, PAT-C revoked | User-confirmed (task #159), and functionally moot now — see below. |
+| Old licensing gists deleted | User-confirmed. |
+| `p1_admin.html` no longer publicly accessible | **User-provided screenshot: direct browser navigation to the exact URL returns GitHub's own 404 ("There isn't a GitHub Pages site here").** This is first-party evidence in the user's real browser, not a cache artifact on their end. Note: my own fetch tool kept returning the old cached page for several minutes after this, even with cache-busting query params — that was a staleness issue in my tool's own cache layer, not evidence the page was still live. The user's screenshot is the trustworthy signal here and is what this closure is based on. |
+| Contaminated `d253b56` history no longer in an authoritative repository | User deleted the `stoploss-app` repository entirely (confirmed via account-dashboard screenshot showing zero repos). No repository = no reachable copy of the contaminated history anywhere on GitHub. |
+| Current repository secret scan passes | `verify_release.py` checks 1–3 pass (re-run repeatedly throughout this session, most recently alongside the offline-grace regression). |
+| No legacy Gist/Worker/ntfy authorization operational | Confirmed in §6/§9 below — current product never used this path. |
+
+**Open non-security item, not a closure blocker:** there is currently no GitHub repository at all
+for the product (the account was fully cleared). `Working/` — the real StopLossPro source — was
+never in the contaminated repo, so nothing was lost, and a local backup exists
+(`_BACKUP_pre_containment_20260805`). But there is no off-machine copy and no repo to deploy from via
+git-push. This is an operational/deployment-convenience question for Stage 3, not a reopened
+incident — tracked there, not here.
 
 ---
 
