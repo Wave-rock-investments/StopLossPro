@@ -13,7 +13,7 @@ If a field is not on this list, the system does not collect it.
 | licence status / plan / expiry | entitlement | admin | life of account + 7y (accounting) |
 | activation_note | proof of manual payment | admin | 7y (accounting) |
 | device public key | device identity | client | until device removed |
-| device name / OS / app version | support and admin display | client | until device removed |
+| device label (non-identifying, derived from device public key — NOT the Windows hostname) / OS name+version / app version | support and admin display | client | until device removed |
 | session timestamps, end_reason | single-session enforcement | derived | 90 days |
 | session token HASH | session auth | derived | until session ends |
 | TOTP secret (encrypted) | MFA | generated | until MFA reset |

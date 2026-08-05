@@ -113,7 +113,8 @@ def check_no_legacy_trust_paths() -> None:
 def check_no_privacy_invasive_collection() -> None:
     print("\n[3] Privacy — banned data collection")
     banned = ["GeoCoordinate", "Win32_NetworkAdapterConfiguration",
-              "MACAddress", "getnode()"]
+              "MACAddress", "getnode()", "gethostname", "getuser()",
+              "os.environ[\"USERNAME\"]", "os.environ['USERNAME']"]
     hits = 0
     for p in source_files():
         try:

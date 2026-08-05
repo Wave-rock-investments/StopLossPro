@@ -35,9 +35,20 @@ class Settings(BaseSettings):
     # ── Signing (Ed25519) ──────────────────────────────────────────────────
     # PRIVATE key is server-only and MUST NEVER be shipped in a client build.
     # Both are PEM, base64-encoded to survive env-var transport.
+    # This key signs authorization GRANTS only. It must not be reused for
+    # anything else — see STOPLOSS_TOTP_ENCRYPTION_KEY_B64 below for why.
     SIGNING_PRIVATE_KEY_B64: str = ""
     SIGNING_PUBLIC_KEY_B64: str = ""
     SIGNING_KEY_ID: str = "k1"          # rotation: bump when issuing a new pair
+
+    # ── MFA secret encryption (independent of signing) ─────────────────────
+    # Protects TOTP secrets at rest. Deliberately a SEPARATE secret from the
+    # Ed25519 signing key — the two protect different things (grant integrity
+    # vs. MFA confidentiality) and must be rotatable independently. A signing
+    # key rotation (e.g. after a suspected leak) must not force every
+    # customer's TOTP secret to be re-encrypted, and vice versa. Generate
+    # with: python -m app.keygen
+    TOTP_ENCRYPTION_KEY_B64: str = ""
 
     # ── Token / session policy ─────────────────────────────────────────────
     GRANT_TTL_SECONDS: int = 180        # short-lived signed authorization grant
@@ -88,6 +99,16 @@ class Settings(BaseSettings):
             problems.append("SIGNING_PRIVATE_KEY_B64 is not set.")
         if not self.SIGNING_PUBLIC_KEY_B64:
             problems.append("SIGNING_PUBLIC_KEY_B64 is not set.")
+        if not self.TOTP_ENCRYPTION_KEY_B64:
+            problems.append(
+                "TOTP_ENCRYPTION_KEY_B64 is not set. This must be an independent "
+                "secret, not the signing key — see app/config.py."
+            )
+        elif self.TOTP_ENCRYPTION_KEY_B64 == self.SIGNING_PRIVATE_KEY_B64:
+            problems.append(
+                "TOTP_ENCRYPTION_KEY_B64 is identical to SIGNING_PRIVATE_KEY_B64. "
+                "These must be independent secrets — generate a separate key."
+            )
         return problems
 
 

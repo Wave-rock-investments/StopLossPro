@@ -32,6 +32,7 @@ from app.models import (  # noqa: E402
     SessionStatus,
     User,
 )
+from app import admin as _admin_mod  # noqa: E402,F401  (registers admin_users on Base.metadata)
 
 
 @pytest.fixture()
@@ -256,17 +257,30 @@ def test_production_refuses_sqlite_and_missing_keys():
         ENV="production", DEBUG=True,
         DATABASE_URL="sqlite:///./x.db",
         SIGNING_PRIVATE_KEY_B64="", SIGNING_PUBLIC_KEY_B64="",
+        TOTP_ENCRYPTION_KEY_B64="",
     )
     problems = unsafe.assert_production_ready()
     joined = " ".join(problems).lower()
     assert any("sqlite" in p.lower() for p in problems)
     assert "debug" in joined
     assert any("private" in p.lower() for p in problems)
+    assert any("totp_encryption_key_b64 is not set" in p.lower() for p in problems)
+
+    # TOTP key must also be independent of the signing key, not merely present.
+    coupled = Settings(
+        ENV="production", DEBUG=False,
+        DATABASE_URL="postgresql+psycopg://u:p@h:5432/db",
+        SIGNING_PRIVATE_KEY_B64="x", SIGNING_PUBLIC_KEY_B64="y",
+        TOTP_ENCRYPTION_KEY_B64="x",  # same as signing private key — must be rejected
+    )
+    assert any("identical to signing_private_key_b64" in p.lower()
+               for p in coupled.assert_production_ready())
 
     safe = Settings(
         ENV="production", DEBUG=False,
         DATABASE_URL="postgresql+psycopg://u:p@h:5432/db",
         SIGNING_PRIVATE_KEY_B64="x", SIGNING_PUBLIC_KEY_B64="y",
+        TOTP_ENCRYPTION_KEY_B64="z",
     )
     assert safe.assert_production_ready() == []
 

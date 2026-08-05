@@ -29,6 +29,11 @@ STOPLOSS_DATABASE_URL=postgresql+psycopg://USER:PASS@HOST:5432/stoploss
 STOPLOSS_SIGNING_PRIVATE_KEY_B64=<from step 2 — SERVER ONLY>
 STOPLOSS_SIGNING_PUBLIC_KEY_B64=<from step 2>
 STOPLOSS_SIGNING_KEY_ID=k1
+STOPLOSS_TOTP_ENCRYPTION_KEY_B64=<from step 2 — SERVER ONLY, independent secret>
+#   ^ Protects MFA secrets at rest. Deliberately NOT derived from the signing
+#     key above (see app/config.py) — rotating one must never force rotating
+#     the other. The app refuses to boot in production if this equals the
+#     signing private key or is left empty.
 
 # 4. Migrate
 python -m alembic upgrade head
@@ -37,12 +42,20 @@ python -m alembic upgrade head
 python -m app.bootstrap_admin
 
 # 6. Serve behind TLS. Terminate HTTPS at the platform's proxy.
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+#    --no-access-log: uvicorn's default access log writes client IP + full
+#    request line to stdout for every request, with no defined retention —
+#    an undocumented second copy of data DATA_INVENTORY.md already scopes
+#    to audit_events (1-year retention, security purpose only). Found during
+#    the Step 14 privacy audit. If host-level access logs are wanted for ops
+#    reasons, add them deliberately with an explicit retention policy and
+#    reflect that in DATA_INVENTORY.md — do not rely on the framework default.
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
 ```
 
-The app refuses to boot if `ENV=production` and any of: the database is SQLite,
-`DEBUG` is on, or either signing key is missing. Failing at boot beats failing
-at 3am under a race condition.
+The app refuses to boot if `ENV=production` and any of: the database is
+SQLite, `DEBUG` is on, either signing key is missing, the TOTP encryption key
+is missing, or the TOTP encryption key equals the signing private key.
+Failing at boot beats failing at 3am under a race condition.
 
 ## 3. Building the client
 
@@ -95,13 +108,41 @@ The signing key must never enter the repository, a build script, or CI logs.
 
 ## 5. Key rotation
 
+**Signing key** (Ed25519 — signs grants) and **TOTP encryption key** (Fernet —
+protects MFA secrets at rest) are independent secrets. Rotating one never
+requires rotating the other; the procedures below are separate.
+
+### 5a. Signing key rotation
+
 1. `python -m app.keygen` → new pair
 2. Set the new private key on the server, bump `STOPLOSS_SIGNING_KEY_ID` to `k2`
 3. Ship a client update that accepts **both** `k1` and `k2`
 4. Once adoption is sufficient, drop `k1`
 
-TOTP secrets are encrypted with a key derived from the signing private key, so
-rotation requires re-encrypting them. Do not rotate without that migration.
+This has no effect on stored TOTP secrets — they are encrypted under the
+separate `STOPLOSS_TOTP_ENCRYPTION_KEY_B64`, untouched by this rotation.
+
+### 5b. TOTP encryption key rotation
+
+Unlike the signing key, this is a *symmetric* key — there is no public half to
+roll forward, so old blobs become undecryptable the moment the env var
+changes. Rotate as a coordinated maintenance pass, not a config flip:
+
+1. `python -m app.keygen` → note the new `STOPLOSS_TOTP_ENCRYPTION_KEY_B64`
+2. Temporarily keep the OLD key available (e.g. as `STOPLOSS_TOTP_ENCRYPTION_KEY_B64_OLD`
+   in the deploy environment, not in the repo)
+3. Run a one-off maintenance script that, for every `mfa_credentials` row:
+   decrypts `secret_encrypted` with the OLD key, re-encrypts with the NEW key
+   (both via `app.security` — do not hand-roll Fernet calls), writes it back
+   in the same transaction as the read
+4. Verify a sample of admin/customer TOTP logins succeed post-migration
+5. Remove the OLD key from the environment
+
+Do not rotate this key without running that pass — see
+`test_totp_key_rotation_without_reencryption_fails_cleanly_not_silently` in
+`tests/test_phase16_key_separation.py` for what happens if you skip it (a
+clean `ValueError`, not silent data loss, but every affected customer is
+locked out of MFA until support resets it).
 
 ## 6. Backups
 
@@ -121,6 +162,10 @@ on authentication failure spikes (credential stuffing), disk and connection-pool
 alerts on the database.
 
 Never log: passwords, TOTP secrets, recovery codes, session tokens, grants.
+Client IP addresses are recorded in exactly one place — `audit_events`, for
+security purposes, 1-year retention (see DATA_INVENTORY.md). Do not let a
+second, undocumented copy of client IPs accumulate in host/proxy access
+logs without the same deliberate retention decision.
 
 ## 8. Incident response
 

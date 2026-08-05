@@ -32,6 +32,10 @@ from app.models import (
     Licence, LicenceStatus, SessionStatus, User, utcnow,
 )
 
+# Reuses the same in-process limiter as customer auth (app/api.py) rather than
+# a second implementation — one bucket store, one behavior to reason about.
+from app.api import client_ip, rate_limit  # noqa: E402
+
 router = APIRouter()
 
 # In-memory admin sessions. Fine for one operator; a restart simply forces a
@@ -128,6 +132,15 @@ def login_form(error: str = ""):
 def login_submit(response: Response, request: Request, email: str = Form(...),
                  password: str = Form(...), totp: str = Form(default=""),
                  db: Session = Depends(get_db)):
+    # The admin account is the highest-value identity in the system — a
+    # compromise here compromises every customer licence. It must be rate
+    # limited at least as strictly as customer login, not left unlimited.
+    # Covers both password and TOTP brute force: both are submitted through
+    # this one endpoint, so one limiter here protects both attack surfaces.
+    ip = client_ip(request)
+    rate_limit(f"admin_login:{ip}", limit=10, window=300)
+    rate_limit(f"admin_login:{email.strip().lower()}", limit=8, window=300)
+
     admin = db.execute(select(AdminUser).where(AdminUser.email == email.strip().lower())).scalar_one_or_none()
 
     if not admin or not security.verify_password(password, admin.password_hash):

@@ -1,8 +1,43 @@
 # Credential Exposure Incident — 2026-08-05
 
-**Status:** Working tree contained. Revocation and remote cleanup PENDING USER ACTION.
+**Status:** **OPEN.** Working tree contained and independently re-verified clean. Token/gist
+revocation confirmed by user. Two remote-cleanup items remain outstanding and are independently
+**confirmed still open** as of the Step 2 release-gate verification below — this incident is not
+being closed in this pass.
 **Severity:** Critical.
 **Discovered:** During the Phase 0 pre-commit secret scan of the Security MVP implementation.
+
+---
+
+## 0. Step 2 verification pass — 2026-08-05 (release-candidate gate)
+
+Performed as part of the RC production-validation process, specifically to check the claim "all
+identified GitHub PATs and old licensing Gists have been deleted/revoked" against what is
+independently checkable from this environment, and to decide whether this incident may be marked
+CLOSED. **It may not be, yet.** Findings:
+
+| Item | Method | Result |
+|---|---|---|
+| Token/gist revocation (GitHub API tokens, gist content) | Cannot be independently verified — no GitHub-authenticated access from this environment, and none will be requested (credential entry is out of scope for this assistant). Taken on user's word per §4.1 confirmation received earlier. | **Accepted, unverified by me.** |
+| `p1_admin.html` public GitHub Pages deployment | Direct HTTPS fetch of `https://wave-rock-investments.github.io/stoploss-site/p1_admin.html` performed just now. | **STILL LIVE.** The admin-panel page renders and serves normally. Whether the deployed copy's embedded `_TX` token array was ever updated to match the local `_TX=[]` neutralization could not be confirmed from a rendered-text fetch (source view was not inspected) — but the file has clearly **not been deleted or the deployment taken down**, which is what §4.2 actually calls for. Item 4.2 remains **OPEN**. |
+| Local working-tree copy of `admin_dashboard.html` (`Dead/P1_P2_superseded_2026-08-04/P1/web/admin_dashboard.html`) | Direct file read. | Confirmed `const _TX=[];` — neutralized, matches prior record. This is the *local* copy only, not the deployed one above. |
+| Git history contamination (`d253b56`) | `git merge-base --is-ancestor d253b56 <ref>` against local `main`, `remotes/origin/main`, and `phase0-clean-baseline`. | `main` and `origin/main` (as of the last local fetch) **still contain** `d253b56`. `phase0-clean-baseline` correctly does **not**. §5's recommended delete-and-recreate migration has **not** been executed — this requires an authenticated GitHub session this environment does not have and, per your own instruction, is not this assistant's action to take unilaterally regardless. Item §5 remains **OPEN**. |
+| Working tree — P1/P2 source (`stoploss_mt4.py`, `stoploss_mt5.py` in `Dead/`) | Direct grep for `GIST_TOKEN`, `ghp_`/`gho_`/`ghs_`/`github_pat_` patterns. | No matches — current working-tree copies do not carry a live token string. (Historical record above still correctly notes the token was present in the *commit* that shipped the P1/P2 binaries; that fact doesn't change.) |
+| `Historical/` tree | Targeted grep of non-build files (excluded large `.venv`/`build`/`dist`/zip contents — traversing those timed out repeatedly in this sandbox due to file-count/cloud-sync overhead, not a security decision). | One comment referencing "GIST_TOKEN" by name, no value. Clean. |
+| Current product (`Working/`) | `verify_release.py` — checks 1–3 (secrets, legacy trust paths, privacy). | All three **PASS**. Only the expected, unrelated `SERVER_PUBLIC_KEY_B64 is EMPTY` failure remains (that's Step 4/10 of the RC process, not a credential-incident item). |
+
+**Conclusion: this incident stays OPEN.** Two concrete actions remain, both requiring your direct,
+authenticated GitHub access — neither can be completed from here:
+1. Delete (or otherwise take down) the `stoploss-site` GitHub Pages deployment, or at minimum
+   delete `p1_admin.html` from it, per §4.2.
+2. Execute the delete-and-recreate remote migration in §5 (or confirm you've decided against it and
+   want the alternative `filter-repo` approach instead — either way, this assistant will not run a
+   destructive git-history rewrite or repository deletion without your explicit go-ahead at the time
+   of execution, consistent with the standing instruction to propose and wait, not act unilaterally,
+   on irreversible history operations).
+
+Do not report "LEGACY INCIDENT: CLOSED" in the final release-readiness report until both are done
+and re-verified.
 
 ---
 

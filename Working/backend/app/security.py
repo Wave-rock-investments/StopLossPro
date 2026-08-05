@@ -94,16 +94,38 @@ def _normalise_recovery(code: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════
 # TOTP  (RFC 6238 — Google Authenticator compatible)
 # ══════════════════════════════════════════════════════════════════════════
-def _fernet() -> Fernet:
-    """Derive the at-rest encryption key from the Ed25519 private key material.
+def _fernet_from(key_material: str) -> Fernet:
+    key = base64.urlsafe_b64encode(hashlib.sha256(key_material.encode()).digest())
+    return Fernet(key)
 
-    This avoids introducing a second secret to manage. If the signing key
-    rotates, TOTP secrets must be re-encrypted — documented in the rotation
-    runbook.
+
+def _totp_fernet() -> Fernet:
+    """MFA secrets are encrypted with an INDEPENDENT key, not derived from the
+    Ed25519 signing key. This is a deliberate security-domain split (see
+    app/config.py TOTP_ENCRYPTION_KEY_B64 and docs/CREDENTIAL_INCIDENT.md
+    step 1.1): a signing-key rotation must not force every customer's TOTP
+    secret to be re-encrypted, and a TOTP-key rotation must not touch grant
+    signing. Do not merge these back into one secret.
+    """
+    src = settings.TOTP_ENCRYPTION_KEY_B64 or "dev-only-insecure-totp-placeholder"
+    return _fernet_from(src)
+
+
+def _legacy_signing_derived_fernet() -> Fernet:
+    """Pre-migration scheme (kept for decrypt-only backward compatibility).
+
+    Before the independent TOTP_ENCRYPTION_KEY_B64 was introduced, the TOTP
+    Fernet key was derived from SIGNING_PRIVATE_KEY_B64. Any secret encrypted
+    under that scheme carries no version prefix. This function exists only so
+    those legacy blobs keep decrypting during the migration window; it must
+    never be used to encrypt anything new.
     """
     src = settings.SIGNING_PRIVATE_KEY_B64 or "dev-only-insecure-placeholder"
-    key = base64.urlsafe_b64encode(hashlib.sha256(src.encode()).digest())
-    return Fernet(key)
+    return _fernet_from(src)
+
+
+_TOTP_ENC_V2_PREFIX = "v2:"  # independent-key scheme (current)
+                             # no prefix = legacy signing-key-derived scheme
 
 
 def new_totp_secret() -> str:
@@ -111,14 +133,33 @@ def new_totp_secret() -> str:
 
 
 def encrypt_totp_secret(secret: str) -> str:
-    return _fernet().encrypt(secret.encode()).decode()
+    """Always encrypts under the current (independent-key) scheme."""
+    token = _totp_fernet().encrypt(secret.encode()).decode()
+    return _TOTP_ENC_V2_PREFIX + token
 
 
 def decrypt_totp_secret(blob: str) -> str:
+    """Decrypts current-scheme secrets; falls back to the legacy
+    signing-key-derived scheme for blobs encrypted before the migration.
+    """
+    if blob.startswith(_TOTP_ENC_V2_PREFIX):
+        token = blob[len(_TOTP_ENC_V2_PREFIX):]
+        try:
+            return _totp_fernet().decrypt(token.encode()).decode()
+        except InvalidToken as exc:
+            raise ValueError(
+                "TOTP secret could not be decrypted (TOTP_ENCRYPTION_KEY_B64 "
+                "missing or rotated without a re-encryption pass?)"
+            ) from exc
+
+    # No prefix -> pre-migration blob, encrypted from the signing key.
     try:
-        return _fernet().decrypt(blob.encode()).decode()
+        return _legacy_signing_derived_fernet().decrypt(blob.encode()).decode()
     except InvalidToken as exc:
-        raise ValueError("TOTP secret could not be decrypted (signing key rotated?)") from exc
+        raise ValueError(
+            "TOTP secret could not be decrypted (legacy signing-derived "
+            "scheme — signing key rotated since this secret was encrypted?)"
+        ) from exc
 
 
 def totp_provisioning_uri(secret: str, account: str, issuer: str = "StopLossPro") -> str:

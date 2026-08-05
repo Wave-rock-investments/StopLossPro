@@ -25,9 +25,9 @@ The risk engine is untouched by any of this.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import platform as _platform
-import socket
 
 log = logging.getLogger("StopLossPro.activation")
 
@@ -187,7 +187,12 @@ def _show_activation_blocker() -> bool:
         ok, code, msg = provider.login(
             email, pw,
             device_public_key=device_pub,
-            device_name=socket.gethostname()[:60],
+            # Non-identifying label: distinguishes devices in the admin panel
+            # without leaking the real Windows hostname (which often embeds
+            # the owner's name — see docs/OFFLINE_GRACE_ANALYSIS.md sibling
+            # finding in the Step 14 privacy audit; DATA_INVENTORY.md
+            # explicitly promises hostname is NOT collected).
+            device_name=f"Device-{hashlib.sha256(device_pub.encode()).hexdigest()[:8]}",
             os_name=f"{_platform.system()} {_platform.release()}",
             app_version="1.0.0",
             takeover=takeover_wanted["v"],
