@@ -114,10 +114,38 @@ requires rotating the other; the procedures below are separate.
 
 ### 5a. Signing key rotation
 
+**Verified 2026-08-05 (RC gate, Stage 2 crypto-architecture check):** every
+grant already carries `kid` (`app/security.py` `issue_grant`/`verify_grant`,
+`GrantClaims.key_id`) — the server-side plumbing for rotation is in place.
+**However, the shipped client is single-key, not multi-key.**
+`lib/licensing.py` bakes in exactly one `SERVER_PUBLIC_KEY_B64` string at
+build time and `verify_grant()` there checks the token's signature against
+only that one key — it does not read `kid` or consult a set of trusted keys.
+There is also no auto-update mechanism; this is a manually distributed EXE
+sold over Reddit/Telegram.
+
+**Consequence:** the moment the server starts signing with a new private key,
+every already-installed customer EXE (which still has the *old* public key
+compiled in) fails every subsequent grant verification and that customer is
+locked out — not eventually, immediately, for 100% of the installed base,
+until each of them individually downloads and installs a new build. "Ship a
+client update that accepts both k1 and k2" is aspirational text describing a
+capability the client does not currently have; treat rotation as customer-
+impacting until this is built. It is **not** built now because no rotation is
+imminent (no production key exists yet) and adding a multi-key keyring to the
+client is a scope change, not a bug fix — out of bounds under the current
+feature freeze without an explicit go-ahead.
+
+Until the client is updated to look up a public key by `kid`, the real
+procedure is:
+
 1. `python -m app.keygen` → new pair
 2. Set the new private key on the server, bump `STOPLOSS_SIGNING_KEY_ID` to `k2`
-3. Ship a client update that accepts **both** `k1` and `k2`
-4. Once adoption is sufficient, drop `k1`
+3. **Every customer must reconnect on a rebuilt client carrying the new
+   public key before you cut the server over** — there is no overlap window.
+   Coordinate this as a release, not a background rotation.
+4. Only rotate on suspected compromise (see §8) or as part of a deliberate,
+   communicated release — never routinely.
 
 This has no effect on stored TOTP secrets — they are encrypted under the
 separate `STOPLOSS_TOTP_ENCRYPTION_KEY_B64`, untouched by this rotation.
