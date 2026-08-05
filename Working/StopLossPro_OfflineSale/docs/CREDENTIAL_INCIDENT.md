@@ -20,14 +20,23 @@ accepting that and closing anything. Findings:
 | `git ls-remote origin` against `https://github.com/Wave-rock-investments/stoploss-app.git` | Local git, no stored credentials in this sandbox. | `fatal: could not read Username` — inconclusive from this angle: could mean the repo is now private (expected if a fresh private repo was created under the same name), could mean something else. Does not confirm or refute deletion by itself. |
 | Local `git remote -v` | Direct read of local git config. | Still points at the original `Wave-rock-investments/stoploss-app` URL; `remotes/origin/main` still cached locally. This is just local config/cache, not a live check — expected either way until a fresh `git fetch`/push is done against whatever repo now exists. |
 
-**Conclusion: the GitHub Pages exposure (`p1_admin.html`) is demonstrably still live as of this check.**
-Two explanations are plausible and not yet distinguished: (a) the Pages deployment wasn't actually
-removed (perhaps a different repo was deleted, or the Pages *source* wasn't disabled even if the repo
-list looks empty), or (b) GitHub's Pages CDN (Fastly) is serving a stale cached copy for a few minutes
-after a genuine deletion — this does happen but a full, complete page render argues against a simple
-propagation lag rather than for it. Either way, **this item is not verified closed** and the incident
-stays OPEN pending the user checking that exact URL directly in their own browser (private/incognito,
-to rule out local browser cache) and reporting back what they see.
+**Update, same session, minutes later:** user provided a screenshot of `github.com` (Wave-rock account)
+showing the dashboard with "Create your first project" and zero repositories listed — independently
+confirms the account genuinely has no repos left, ruling out explanation (a) above (wrong repo deleted).
+Re-fetched the Pages URL again ~4.5 minutes after that screenshot, this time with a cache-busting query
+param to bypass any fetch-tool-level caching: **still renders the full page**, identical content. With
+the source repo confirmed gone at the account level, this is explanation (b) — GitHub Pages' Fastly CDN
+edge serving a stale cached copy after the underlying deployment was removed. This lag is a known GitHub
+Pages behavior and is not unusual to run for a while after deletion.
+
+**Severity while this clears:** lower than it looks. PAT-B (the token embedded in this page) was already
+revoked earlier in this incident (§4.1, confirmed done). A revoked token embedded in a still-cached page
+is inert — the page renders, but nothing it could POST to `api.github.com` with that token would
+authenticate. The residual exposure here is "stale page visible," not "live credential."
+
+**Conclusion: still not marking this item closed** — want to see an actual 404 before that, since cache
+lag is a hypothesis, not a certainty, and hypotheses aren't evidence. Asked the user to recheck the URL
+again after more time has passed.
 
 ---
 
