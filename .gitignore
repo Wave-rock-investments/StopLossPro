@@ -40,6 +40,13 @@ service-account*.json
 logs.key
 *.enc.key
 
+# Local databases — may contain real customer data. Never commit.
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
 # Backups — may contain pre-cleanup secrets. Keep OFF the repo.
 _BACKUP_*/
 *_BACKUP_*/
