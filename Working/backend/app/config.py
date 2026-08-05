@@ -70,6 +70,16 @@ class Settings(BaseSettings):
     API_PREFIX: str = "/api/v1"
     CORS_ORIGINS: str = ""              # comma-separated; empty = none allowed
 
+    # ── First-admin bootstrap (temporary, remove after use) ────────────────
+    # Free-tier hosts often have no shell, so `python -m app.bootstrap_admin`
+    # (interactive, requires a TTY) can't run. This lets the SAME operation
+    # happen over HTTP instead: GET/POST /admin/bootstrap in app/admin.py.
+    # Doubly gated — empty by default (routes 404), AND the routes refuse to
+    # act once a single AdminUser row exists, same as the CLI script. Set
+    # this to a long random value only long enough to create the first admin,
+    # then unset it. Never reused for anything else.
+    ADMIN_BOOTSTRAP_TOKEN: str = ""
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _warn_sqlite_in_prod(cls, v: str, info):

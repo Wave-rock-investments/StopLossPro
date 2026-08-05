@@ -14,8 +14,13 @@ strongly than a customer account, not less.
 """
 from __future__ import annotations
 
+import base64
 import enum
+import hashlib
+import hmac
+import json
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +31,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from sqlalchemy import Boolean, DateTime
 
 from app import security, services
+from app.config import get_settings
 from app.database import get_db
 from app.models import (
     AccountStatus, AppSession, AuditEvent, Base, Device, DeviceStatus,
@@ -179,6 +185,161 @@ def admin_logout(request: Request):
     r = RedirectResponse("/admin/login", status_code=303)
     r.delete_cookie(COOKIE)
     return r
+
+
+# ── first-admin bootstrap (temporary — see app/config.py ADMIN_BOOTSTRAP_TOKEN) ──
+# HTTP equivalent of `python -m app.bootstrap_admin` (app/bootstrap_admin.py),
+# for hosts with no shell access (e.g. a free-tier web service). Same rules as
+# that script, enforced twice as hard because this surface is reachable over
+# the network: nothing happens unless STOPLOSS_ADMIN_BOOTSTRAP_TOKEN is set AND
+# matches, and unless zero admins currently exist — checked on every request,
+# including the final commit, to close the race window. Delete the env var
+# once the first admin is created; the zero-admin check disables this on its
+# own regardless, but removing it is defense in depth.
+_BOOTSTRAP_PENDING_TTL = 600  # seconds the step-1 -> step-2 handoff is valid
+
+
+def _bootstrap_gate_open(token: str, db: Session) -> bool:
+    cfg_token = get_settings().ADMIN_BOOTSTRAP_TOKEN
+    if not cfg_token or not secrets.compare_digest(token or "", cfg_token):
+        return False
+    return db.execute(select(AdminUser)).scalars().first() is None
+
+
+def _b64u(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _b64u_dec(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _sign_pending(payload: dict, token: str) -> str:
+    """HMAC-signed, self-contained handoff between step 1 and step 2 so the
+    server doesn't need session storage for a two-request flow. Signed with
+    the bootstrap token itself — a secret only the deployer holds, and one
+    that becomes worthless the moment the first admin exists anyway."""
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    sig = hmac.new(token.encode(), body, hashlib.sha256).digest()
+    return f"{_b64u(body)}.{_b64u(sig)}"
+
+
+def _verify_pending(blob: str, token: str) -> dict:
+    try:
+        body_b64, sig_b64 = blob.split(".")
+        body, sig = _b64u_dec(body_b64), _b64u_dec(sig_b64)
+    except Exception as exc:
+        raise ValueError("malformed pending token") from exc
+    expected = hmac.new(token.encode(), body, hashlib.sha256).digest()
+    if not hmac.compare_digest(sig, expected):
+        raise ValueError("bad signature")
+    payload = json.loads(body)
+    if float(payload.get("exp", 0)) < time.time():
+        raise ValueError("expired")
+    return payload
+
+
+def _bootstrap_form(token: str, error: str = "") -> HTMLResponse:
+    err = f'<p style="color:#f87171">{_h(error)}</p>' if error else ""
+    return _page("Create the first administrator", f"""
+<div class="card" style="max-width:420px">
+<h3>Create the first StopLossPro administrator</h3>
+<p>One-time setup page. Only reachable with the bootstrap token, and only
+while no administrator exists yet.</p>
+{err}
+<form method="post" action="/admin/bootstrap?token={_h(token)}">
+ <p><input name="email" type="email" placeholder="Email" required style="width:100%"></p>
+ <p><input name="password" type="password" placeholder="Password (min 12 chars)" required style="width:100%"></p>
+ <p><input name="password2" type="password" placeholder="Confirm password" required style="width:100%"></p>
+ <button type="submit">Continue &rarr; set up authenticator</button>
+</form></div>""")
+
+
+@router.get("/admin/bootstrap", response_class=HTMLResponse)
+def bootstrap_start(request: Request, token: str = "", db: Session = Depends(get_db)):
+    rate_limit(f"admin_bootstrap:{client_ip(request)}", limit=10, window=300)
+    if not _bootstrap_gate_open(token, db):
+        raise HTTPException(404)
+    return _bootstrap_form(token)
+
+
+@router.post("/admin/bootstrap", response_class=HTMLResponse)
+def bootstrap_step1(request: Request, token: str = "", email: str = Form(...),
+                    password: str = Form(...), password2: str = Form(...),
+                    db: Session = Depends(get_db)):
+    rate_limit(f"admin_bootstrap:{client_ip(request)}", limit=10, window=300)
+    if not _bootstrap_gate_open(token, db):
+        raise HTTPException(404)
+
+    email = email.strip().lower()
+    if "@" not in email:
+        return _bootstrap_form(token, "That does not look like an email address.")
+    if len(password) < 12:
+        return _bootstrap_form(token, "Password must be at least 12 characters.")
+    if password != password2:
+        return _bootstrap_form(token, "Passwords do not match.")
+
+    secret = security.new_totp_secret()
+    uri = security.totp_provisioning_uri(secret, email, issuer="StopLossPro Admin")
+    pending = _sign_pending(
+        {"email": email, "pwh": security.hash_password(password), "totp": secret,
+         "exp": time.time() + _BOOTSTRAP_PENDING_TTL},
+        token,
+    )
+    return _page("Confirm authenticator", f"""
+<div class="card" style="max-width:460px">
+<h3>Add this to your authenticator app</h3>
+<p>Secret: <code>{_h(secret)}</code></p>
+<p>Or paste this URI if your app supports it:<br>
+<code style="word-break:break-all">{_h(uri)}</code></p>
+<p>Shown once. If you lose it before confirming, submit the form again to restart.</p>
+<form method="post" action="/admin/bootstrap/confirm?token={_h(token)}">
+ <input type="hidden" name="pending" value="{_h(pending)}">
+ <p><input name="code" placeholder="6-digit code" maxlength="6" inputmode="numeric" required style="width:100%"></p>
+ <button type="submit">Create administrator</button>
+</form></div>""")
+
+
+@router.post("/admin/bootstrap/confirm", response_class=HTMLResponse)
+def bootstrap_step2(request: Request, token: str = "", pending: str = Form(...),
+                    code: str = Form(...), db: Session = Depends(get_db)):
+    rate_limit(f"admin_bootstrap:{client_ip(request)}", limit=10, window=300)
+    if not _bootstrap_gate_open(token, db):
+        raise HTTPException(404)
+
+    try:
+        p = _verify_pending(pending, token)
+    except ValueError:
+        return _page("Expired", f'<div class="card">That setup link expired or was '
+                     f'tampered with. <a href="/admin/bootstrap?token={_h(token)}">Start over</a>.</div>')
+
+    ok, _step = security.verify_totp(p["totp"], code)
+    if not ok:
+        return _page("Invalid code", f'<div class="card">That code did not verify. '
+                     f'<a href="/admin/bootstrap?token={_h(token)}">Start over</a>.</div>')
+
+    # Re-check immediately before the write — closes the race between the
+    # gate check above and this commit (two concurrent bootstrap attempts).
+    if db.execute(select(AdminUser)).scalars().first():
+        raise HTTPException(404)
+
+    admin = AdminUser(
+        email=p["email"], password_hash=p["pwh"],
+        totp_secret_encrypted=security.encrypt_totp_secret(p["totp"]),
+        totp_confirmed=True, role=AdminRole.SUPER_ADMIN.value,
+    )
+    db.add(admin)
+    services.audit(db, "ADMIN_BOOTSTRAPPED", actor=f"admin:{p['email']}",
+                   detail="created via one-time HTTP bootstrap, not CLI")
+    db.commit()
+
+    return _page("Administrator created", f"""<div class="card">
+<h3>Done</h3>
+<p>Administrator <code>{_h(p['email'])}</code> created. Sign in at
+<a href="/admin/login">/admin/login</a>.</p>
+<p><b>Now remove STOPLOSS_ADMIN_BOOTSTRAP_TOKEN from the environment.</b> This
+page already refuses to run again since an administrator exists, but removing
+the token closes it out completely.</p></div>""")
 
 
 # ── customer list ──────────────────────────────────────────────────────────

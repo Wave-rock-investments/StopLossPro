@@ -40,6 +40,10 @@ python -m alembic upgrade head
 
 # 5. Create the first admin (interactive, one time)
 python -m app.bootstrap_admin
+#   No shell on this host (e.g. Render Free)? Set STOPLOSS_ADMIN_BOOTSTRAP_TOKEN
+#   to a long random value, redeploy, then visit /admin/bootstrap?token=<value>
+#   in a browser — same rules as the CLI (MFA mandatory, refuses once an admin
+#   exists, re-checked on every request). Unset the env var again once done.
 
 # 6. Serve behind TLS. Terminate HTTPS at the platform's proxy.
 #    --no-access-log: uvicorn's default access log writes client IP + full
