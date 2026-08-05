@@ -40,10 +40,15 @@ from licensing import (  # noqa: E402
 _provider: LicensingProvider | None = None
 
 
-def get_provider() -> LicensingProvider:
+def get_provider(on_state_change=None) -> LicensingProvider:
+    """`on_state_change` only takes effect the first time this constructs the
+    singleton — pass it from the earliest call in the startup sequence
+    (Product Sell.py, before _resume_session()) so it's wired for the whole
+    process lifetime, including the background heartbeat thread that later
+    detects an admin suspending/revoking the account mid-session."""
     global _provider
     if _provider is None:
-        _provider = LicensingProvider()
+        _provider = LicensingProvider(on_state_change=on_state_change)
     return _provider
 
 
@@ -187,6 +192,69 @@ _CONSENT_COPY = {
 }
 
 
+def _scrollable_body(win, bg: str = "#0d0d0f", height: int = 260):
+    """A vertically scrollable content area for a Toplevel.
+
+    Fixed-size, non-resizable dialogs packed top-to-bottom have a real
+    failure mode: on some Windows DPI/font-scaling configurations the
+    content renders taller than the window, and with no scrollbar and no
+    resize handle the controls below the fold (e.g. a submit button) become
+    permanently unreachable — the window just clips them, silently. That
+    happened for real on the Create account and consent dialogs. Every
+    dialog with more than a couple of fields should render into the `inner`
+    frame this returns, not directly into `win`.
+
+    `height` is a deliberate, explicit starting size for the viewport, not
+    a cosmetic default. A bare Canvas has no fixed request of its own — left
+    alone, pack's propagation lets it balloon to match whatever the inner
+    frame needs, which defeats scrolling entirely and was the actual cause
+    of the button-goes-missing failure (the canvas grew to full content
+    height instead of clipping it). Fixing the frame's height and turning
+    propagation off makes the viewport size deterministic; `expand=True` on
+    the caller's `.pack()` still lets it grow into extra room when the
+    window is resized larger.
+    """
+    import tkinter as tk
+
+    outer = tk.Frame(win, bg=bg, height=height)
+    outer.pack_propagate(False)
+    canvas = tk.Canvas(outer, bg=bg, highlightthickness=0)
+    vsb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas, bg=bg)
+
+    inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+    def _on_inner_configure(_e=None):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+    inner.bind("<Configure>", _on_inner_configure)
+
+    def _on_canvas_configure(e):
+        canvas.itemconfig(inner_id, width=e.width)
+    canvas.bind("<Configure>", _on_canvas_configure)
+
+    canvas.configure(yscrollcommand=vsb.set)
+    canvas.pack(side="left", fill="both", expand=True)
+    vsb.pack(side="right", fill="y")
+
+    # Mouse wheel scrolling. bind_all is scoped for the life of this modal
+    # Toplevel only — unbound on destroy so it doesn't leak onto whatever
+    # window the user interacts with next.
+    def _on_mousewheel(e):
+        canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+    def _bind_wheel(_e=None):
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+    def _unbind_wheel(_e=None):
+        canvas.unbind_all("<MouseWheel>")
+
+    canvas.bind("<Enter>", _bind_wheel)
+    canvas.bind("<Leave>", _unbind_wheel)
+    win.bind("<Destroy>", _unbind_wheel)
+
+    return outer, inner
+
+
 def _show_consent_dialog(root, provider, email: str, outstanding: list[dict]) -> bool:
     """Blocking dialog listing every outstanding required document. Returns
     True only once every one of them has been accepted server-side."""
@@ -195,8 +263,11 @@ def _show_consent_dialog(root, provider, email: str, outstanding: list[dict]) ->
     win = tk.Toplevel(root)
     win.title("Required agreements")
     win.configure(bg="#0d0d0f")
-    win.geometry("460x560")
-    win.resizable(False, False)
+    _W, _H = 480, 600
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    win.geometry(f"{_W}x{_H}+{(sw - _W) // 2}+{(sh - _H) // 2}")
+    win.minsize(380, 320)
+    win.resizable(True, True)
     win.transient(root)
     win.grab_set()
     win.attributes("-topmost", True)
@@ -206,8 +277,8 @@ def _show_consent_dialog(root, provider, email: str, outstanding: list[dict]) ->
     tk.Label(win, text="Please read and accept each of the following.", bg="#0d0d0f",
              fg="#8a8a8a", font=("Segoe UI", 9)).pack(pady=(0, 10))
 
-    body = tk.Frame(win, bg="#0d0d0f")
-    body.pack(fill="both", expand=True, padx=20)
+    scroll_outer, body = _scrollable_body(win, height=380)
+    scroll_outer.pack(fill="both", expand=True, padx=20)
 
     checks: dict[str, tk.BooleanVar] = {}
     for item in outstanding:
@@ -268,8 +339,11 @@ def _show_registration_dialog(root, provider) -> None:
     win = tk.Toplevel(root)
     win.title("Create account")
     win.configure(bg="#0d0d0f")
-    win.geometry("360x420")
-    win.resizable(False, False)
+    _W, _H = 380, 480
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    win.geometry(f"{_W}x{_H}+{(sw - _W) // 2}+{(sh - _H) // 2}")
+    win.minsize(320, 300)
+    win.resizable(True, True)
     win.transient(root)
     win.grab_set()
     win.attributes("-topmost", True)
@@ -280,8 +354,8 @@ def _show_registration_dialog(root, provider) -> None:
              bg="#0d0d0f", fg="#8a8a8a", font=("Segoe UI", 8), wraplength=300,
              justify="center").pack(pady=(0, 12))
 
-    frm = tk.Frame(win, bg="#0d0d0f")
-    frm.pack(padx=30, fill="x")
+    scroll_outer, frm = _scrollable_body(win, height=250)
+    scroll_outer.pack(fill="both", expand=True, padx=30)
 
     def field(label, show=None):
         tk.Label(frm, text=label, bg="#0d0d0f", fg="#8a8a8a",
@@ -295,6 +369,13 @@ def _show_registration_dialog(root, provider) -> None:
     e_email = field("Email")
     e_pass = field("Password (min 12 characters)", show="•")
     e_pass2 = field("Confirm password", show="•")
+
+    # Enter submits from ANY field, not just the last one — a customer who
+    # fills the form top to bottom and hits Enter right after typing their
+    # password (a very natural place to stop) should not have to notice a
+    # button below the fold instead. Bind all four, not just e_pass2.
+    for _e in (e_name, e_email, e_pass, e_pass2):
+        _e.bind("<Return>", lambda _evt: submit())
 
     status = tk.StringVar(value="")
     tk.Label(win, textvariable=status, bg="#0d0d0f", fg="#f87171",
@@ -340,7 +421,6 @@ def _show_registration_dialog(root, provider) -> None:
     btn = tk.Button(win, text="Create account", command=submit, bg="#2563eb", fg="#ffffff",
                     relief="flat", font=("Segoe UI", 11, "bold"), cursor="hand2")
     btn.pack(padx=30, fill="x", ipady=8, pady=(16, 0))
-    e_pass2.bind("<Return>", lambda _e: submit())
 
     e_name.focus_set()
 
@@ -393,6 +473,7 @@ def _show_activation_blocker() -> bool:
 
     e_email = field("Email")
     e_pass = field("Password", show="•")
+    e_email.bind("<Return>", lambda _e: e_pass.focus_set())
 
     totp_frame = tk.Frame(root, bg="#0d0d0f")
     tk.Label(totp_frame, text="Authenticator code (to switch device)", bg="#0d0d0f",

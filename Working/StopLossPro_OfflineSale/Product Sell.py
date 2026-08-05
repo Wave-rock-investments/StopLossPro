@@ -68,6 +68,7 @@ from activation import (
     _show_activation_blocker, _register_if_new, _is_activated,
     _start_session_heartbeat,   # authenticated licence heartbeat (PHASE 12)
     _resume_session,            # try to silently restore a saved session (PHASE 17)
+    get_provider,                # so we can wire on_state_change before first use (PHASE 17)
 )
 
 # ── Widget classes (must be imported so KV can reference them) ────────────────
@@ -461,6 +462,58 @@ _splash = _show_splash()
 if _splash:
     try: _splash.destroy()
     except Exception: pass
+
+# ── Admin activate/deactivate must reach an already-open session, not just
+# block the NEXT launch (PHASE 17). Without this, an admin suspending or
+# revoking a customer's licence from the panel only took effect once that
+# customer happened to close and reopen the app — a suspended account could
+# keep trading indefinitely in the meantime. The background heartbeat
+# thread (started below via _start_session_heartbeat) already polls the
+# server every ~90s and correctly flips LicenceState.authorised to False the
+# moment the server reports the account is no longer ACTIVE; this callback
+# is what makes that transition actually DO something while the app is open.
+_was_authorised = {"v": False}
+
+
+def _on_licence_state_change(state) -> None:
+    """Runs on the background heartbeat thread — never touch Kivy/Tk widgets
+    directly here, only schedule work onto the main thread via Clock."""
+    was, now = _was_authorised["v"], state.authorised
+    _was_authorised["v"] = now
+    if was and not now and state.reason not in ("NOT_AUTHENTICATED", "LOGGED_OUT"):
+        # A previously-authorised session just lost authorisation — the
+        # server said so authoritatively (suspended, revoked, expired), not
+        # merely "unreachable" (that case keeps working inside offline grace
+        # and never reaches here with authorised=False). Kick the user out
+        # now instead of waiting for them to close the app on their own.
+        _msg = state.message or "Your access to StopLoss Pro has changed."
+        Clock.schedule_once(lambda _dt: _force_signed_out(_msg), 0)
+
+
+def _force_signed_out(message: str) -> None:
+    try:
+        import tkinter as _tk
+        from tkinter import messagebox as _messagebox
+        _root = _tk.Tk()
+        _root.withdraw()
+        _root.attributes("-topmost", True)
+        _messagebox.showwarning("StopLoss Pro", f"{message}\n\nThe application will now close.",
+                                 parent=_root)
+        _root.destroy()
+    except Exception as exc:
+        log.warning("_force_signed_out: could not show dialog: %s", exc)
+    try:
+        MDApp.get_running_app().stop()
+    except Exception:
+        _sys.exit(0)
+
+
+get_provider(on_state_change=_on_licence_state_change)   # must be the FIRST
+                                                          # call to get_provider()
+                                                          # in the process so
+                                                          # the singleton is
+                                                          # constructed with
+                                                          # this wired in.
 
 _register_if_new()        # record first install / re-install
 
