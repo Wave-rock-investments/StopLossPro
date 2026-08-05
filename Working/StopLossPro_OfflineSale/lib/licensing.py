@@ -39,11 +39,15 @@ from typing import Callable
 log = logging.getLogger("StopLossPro.licensing")
 
 # ── configuration ──────────────────────────────────────────────────────────
-API_BASE = os.environ.get("STOPLOSSPRO_API", "https://api.stoplosspro.in/api/v1")
+# stoplosspro.in's DNS is not live yet (custom domain, pending). Pointed at
+# the real Render production URL instead so the client actually works today;
+# swap back to the custom domain once its DNS resolves — see DEPLOYMENT.md.
+API_BASE = os.environ.get("STOPLOSSPRO_API", "https://stoplosspro.onrender.com/api/v1")
 
 # Ed25519 PUBLIC verification key, base64 PEM. Safe to ship: it can only
-# VERIFY grants. Populated at build time; empty means "unconfigured".
-SERVER_PUBLIC_KEY_B64 = ""
+# VERIFY grants. Fetched live from GET /api/v1/pubkey (key_id "k1") on the
+# production service 2026-08-05 and pinned here at build time.
+SERVER_PUBLIC_KEY_B64 = "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUNvd0JRWURLMlZ3QXlFQWdGenlSYmcrM21VWXc5NTJZa2JqblBsRWd3SWtWbjRiTFg5a2Z1OU1WVW89Ci0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQo="
 
 _STATE_DIR = os.path.join(os.path.expanduser("~"), ".stoplosspro")
 _STATE_FILE = os.path.join(_STATE_DIR, "state.bin")
