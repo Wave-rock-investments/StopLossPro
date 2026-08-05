@@ -1,0 +1,76 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# SECRETS — never commit. Added 2026-08-05 after a credential-leak incident in
+# which three GitHub PATs reached committed history and a public Pages site.
+# See docs/CREDENTIAL_INCIDENT.md before relaxing anything in this block.
+# ═══════════════════════════════════════════════════════════════════════════
+.env
+.env.*
+!.env.example
+*.env
+secrets.*
+credentials.*
+.netrc
+_netrc
+
+# Signing material / private keys
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+*.keystore
+*.asc
+*.gpg
+id_rsa*
+id_ed25519*
+signing/
+certs/
+
+# Cloud / deploy credentials
+.wrangler/
+wrangler.toml.local
+.aws/
+.azure/
+gcloud-*.json
+service-account*.json
+
+# Local licence / session caches (may contain tokens or machine IDs)
+.slcalc_cache
+*.slcalc_cache
+logs.key
+*.enc.key
+
+# Backups — may contain pre-cleanup secrets. Keep OFF the repo.
+_BACKUP_*/
+*_BACKUP_*/
+*.tar.gz
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.venv_linux/
+
+# Build artefacts
+build/
+dist/
+*.spec
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# Local only
+session_setup_result.txt
+net_verify_results.txt
+.github/
+
+# Retired products — permanently out of scope (decision 2026-08-05)
+Dead/
+Historical/

@@ -1,0 +1,19 @@
+# StopLoss Pro — Python requirements
+# ─────────────────────────────────────────────────────────────────────────────
+# Customers: just double-click launch.bat — it runs this automatically.
+# Manual:    pip install -r requirements.txt
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Core UI framework
+kivy>=2.3.1
+kivymd>=1.2.0
+
+# Kivy Windows graphics backends (auto-skipped on Linux/macOS)
+kivy_deps.angle; sys_platform == "win32"
+kivy_deps.glew; sys_platform == "win32"
+kivy_deps.sdl2; sys_platform == "win32"
+
+# MetaTrader 5 bridge — Windows only, optional
+# App runs in offline/manual mode if MT5 is not installed
+MetaTrader5; sys_platform == "win32"
+numpy; sys_platform == "win32"   # MetaTrader5 dependency — must be explicit so PyInstaller bundles it

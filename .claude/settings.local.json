@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pkill -f \"debug_launch\\\\|test\\\\.py\")",
+      "Bash(py -3 debug_launch.py)",
+      "Bash(echo \"PID=$!\")"
+    ]
+  }
+}

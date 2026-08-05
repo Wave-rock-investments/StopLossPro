@@ -1,0 +1,1599 @@
+#:import dp      kivy.metrics.dp
+#:import Clock   kivy.clock.Clock
+#:import Spinner kivy.uix.spinner.Spinner
+
+Root:
+
+<Root>:
+    orientation: "vertical"
+
+    MDTopAppBar:
+        id: topbar
+        title: "StopLoss Pro"
+        elevation: 2
+        md_bg_color: (0.05, 0.05, 0.06, 1) if app.theme_cls.theme_style == "Dark" else (1, 1, 1, 1)
+        specific_text_color: (1, 1, 1, 0.92) if app.theme_cls.theme_style == "Dark" else (0.08, 0.08, 0.10, 1)
+        right_action_items:
+            [["weather-sunny" if app.theme_cls.theme_style == "Dark" else "weather-night", lambda x: root.toggle_theme(), "Toggle theme"]]
+
+    MDBottomNavigation:
+        id: nav
+        panel_color: (0.05, 0.05, 0.06, 1) if app.theme_cls.theme_style == "Dark" else (1, 1, 1, 1)
+        indicator_color: app.theme_cls.primary_color
+        on_switch_tabs: root._on_tab_switch(args[1], args[2])
+
+        # ══════════════════════════════════════════════════════════════════
+        # TAB 1 — CALCULATOR
+        # ══════════════════════════════════════════════════════════════════
+        MDBottomNavigationItem:
+            name: "calc"
+            text: "Calculate"
+            icon: "calculator-variant-outline"
+
+            ScrollView:
+                id: calc_scroll
+                do_scroll_x: False
+                bar_width: 0
+                scroll_type: ["bars", "content"]
+
+                GridLayout:
+                    cols: 1
+                    spacing: dp(12)
+                    padding: [dp(12), dp(12), dp(12), dp(100)]
+                    size_hint_y: None
+                    height: self.minimum_height
+
+                    # INSTRUMENT
+                    MDCard:
+                        orientation: "vertical"
+                        padding: [dp(14), dp(12), dp(14), dp(12)]
+                        radius: [dp(14)]
+                        elevation: 1
+                        size_hint_y: None
+                        height: self.minimum_height
+                        md_bg_color: app.theme_cls.bg_dark
+
+                        MDLabel:
+                            text: "INSTRUMENT"
+                            font_style: "Overline"
+                            theme_text_color: "Secondary"
+                            size_hint_y: None
+                            height: dp(20)
+
+                        MDTextField:
+                            id: instrument
+                            hint_text: "Symbol (e.g. XAUUSD-std)"
+                            mode: "rectangle"
+                            size_hint_y: None
+                            height: dp(56)
+                            on_focus: if self.focus: app.menu.open()
+                            on_text_validate: root.on_instrument_change(self.text.strip())
+
+                        MDLabel:
+                            id: broker_sym_lbl
+                            text: ""
+                            font_style: "Caption"
+                            theme_text_color: "Custom"
+                            text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                            size_hint_y: None
+                            height: dp(18) if self.text else dp(0)
+                            opacity: 1 if self.text else 0
+
+                    # TRADE INPUTS
+                    MDCard:
+                        orientation: "vertical"
+                        padding: [dp(14), dp(12), dp(14), dp(14)]
+                        radius: [dp(14)]
+                        elevation: 1
+                        size_hint_y: None
+                        height: self.minimum_height
+                        focus_behavior: False
+                        ripple_behavior: False
+                        md_bg_color: app.theme_cls.bg_dark
+
+                        MDLabel:
+                            text: "TRADE INPUTS"
+                            font_style: "Overline"
+                            theme_text_color: "Secondary"
+                            size_hint_y: None
+                            height: dp(20)
+
+                        MDBoxLayout:
+                            id: atr_lots_row
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(62)
+                            spacing: dp(10)
+                            MDTextField:
+                                id: atr
+                                hint_text: "ATR"
+                                mode: "rectangle"
+                                multiline: False
+                                size_hint_y: None
+                                height: dp(56)
+                                input_type: "null"
+                                on_touch_down: if self.collide_point(*args[-1].pos): root._suppress_ime(self)
+                                on_touch_up: if self.collide_point(*args[-1].pos): root._schedule_numpad(self)
+                            MDTextField:
+                                id: lots
+                                hint_text: "Lots"
+                                mode: "rectangle"
+                                multiline: False
+                                size_hint_y: None
+                                height: dp(56)
+                                input_type: "null"
+                                on_touch_down: if self.collide_point(*args[-1].pos): root._suppress_ime(self)
+                                on_touch_up: if self.collide_point(*args[-1].pos): root._schedule_numpad(self)
+
+                        MDTextField:
+                            id: entry
+                            hint_text: "Entry Price (optional)"
+                            mode: "rectangle"
+                            multiline: False
+                            size_hint_y: None
+                            height: dp(56)
+                            input_type: "null"
+                            on_touch_down: if self.collide_point(*args[-1].pos): root._suppress_ime(self)
+                            on_touch_up: if self.collide_point(*args[-1].pos): root._schedule_numpad(self)
+
+                        MDRaisedButton:
+                            id: calc_btn
+                            text: "CALCULATE"
+                            size_hint_x: 1
+                            size_hint_y: None
+                            height: dp(52)
+                            pos_hint: {"center_x": .5}
+                            on_touch_up: if self.collide_point(*args[-1].pos): root.on_calculate()
+
+                        # ── FETCH (left) | TIMEFRAME picker (right) ───────────
+                        MDBoxLayout:
+                            id: fetch_row
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: 0
+                            opacity: 0
+                            spacing: dp(6)
+                            MDRaisedButton:
+                                id: fetch_btn
+                                text: "FETCH"
+                                size_hint_x: 0.58
+                                size_hint_y: None
+                                height: dp(48)
+                                md_bg_color: app.theme_cls.primary_color
+                                on_release: root.on_fetch()
+                            Spinner:
+                                id: tf_spinner
+                                text: "H1"
+                                values: ["M1","M5","M15","M30","H1","H4","D1","W1"]
+                                size_hint_x: 0.42
+                                size_hint_y: None
+                                height: dp(48)
+                                background_color: app.theme_cls.primary_color
+                                color: [1, 1, 1, 1]
+                                font_size: dp(13)
+                                on_text: root.on_tf_change(self.text)
+
+                    # AUTO LOT
+                    MDCard:
+                        id: auto_lot_card
+                        focus_behavior: False
+                        ripple_behavior: False
+                        orientation: "vertical"
+                        padding: [dp(14), dp(12), dp(14), dp(12)]
+                        radius: [dp(14)]
+                        elevation: 1
+                        size_hint_y: None
+                        height: self.minimum_height
+                        md_bg_color: app.theme_cls.bg_dark
+
+                        MDLabel:
+                            text: "AUTO LOT SIZE"
+                            font_style: "Overline"
+                            theme_text_color: "Secondary"
+                            size_hint_y: None
+                            height: dp(20)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(62)
+                            spacing: dp(8)
+                            MDTextField:
+                                id: account
+                                hint_text: "Account"
+                                mode: "rectangle"
+                                multiline: False
+                                size_hint_x: 1
+                                size_hint_y: None
+                                height: dp(56)
+                                input_type: "null"
+                                on_touch_down: if self.collide_point(*args[-1].pos): root._suppress_ime(self)
+                                on_touch_up: if self.collide_point(*args[-1].pos): root._schedule_numpad(self)
+                            MDTextField:
+                                id: risk
+                                hint_text: "Risk %"
+                                mode: "rectangle"
+                                multiline: False
+                                size_hint_x: 0.65
+                                size_hint_y: None
+                                height: dp(56)
+                                input_type: "null"
+                                on_touch_down: if self.collide_point(*args[-1].pos): root._suppress_ime(self)
+                                on_touch_up: if self.collide_point(*args[-1].pos): root._schedule_numpad(self)
+                            MDRaisedButton:
+                                text: "AUTO LOT"
+                                size_hint_x: None
+                                size_hint_y: None
+                                width: dp(104)
+                                height: dp(48)
+                                pos_hint: {"center_y": 0.5}
+                                on_touch_up: if self.collide_point(*args[-1].pos): root.on_auto_lot()
+
+                    # RISK ESTIMATE
+                    MDCard:
+                        orientation: "vertical"
+                        padding: [dp(14), dp(12), dp(14), dp(10)]
+                        radius: [dp(14)]
+                        elevation: 1
+                        size_hint_y: None
+                        height: self.minimum_height
+                        md_bg_color: app.theme_cls.bg_dark
+
+                        MDLabel:
+                            text: "RISK ESTIMATE"
+                            font_style: "Overline"
+                            theme_text_color: "Secondary"
+                            size_hint_y: None
+                            height: dp(20)
+
+                        # stale results warning
+                        MDLabel:
+                            id: stale_warning
+                            text: ""
+                            font_style: "Caption"
+                            theme_text_color: "Custom"
+                            text_color: (0.96, 0.65, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.68, 0.38, 0.0, 1)
+                            size_hint_y: None
+                            height: dp(0)
+                            opacity: 0
+
+                        MDSeparator:
+                            size_hint_y: None
+                            height: dp(1)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(24)
+                            MDLabel:
+                                size_hint_x: 0.22
+                            MDLabel:
+                                text: "DISTANCE"
+                                font_style: "Overline"
+                                theme_text_color: "Secondary"
+                                halign: "center"
+                                size_hint_x: 0.38
+                            MDLabel:
+                                text: "P&L"
+                                font_style: "Overline"
+                                theme_text_color: "Secondary"
+                                halign: "right"
+                                size_hint_x: 0.40
+
+                        MDSeparator:
+                            size_hint_y: None
+                            height: dp(1)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(32)
+                            MDLabel:
+                                text: "SL"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                size_hint_x: 0.22
+                                valign: "middle"
+                            MDLabel:
+                                id: sl_distance
+                                text: "—"
+                                font_style: "Caption"
+                                halign: "center"
+                                valign: "middle"
+                                size_hint_x: 0.38
+                            MDLabel:
+                                id: loss
+                                text: "—"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                halign: "right"
+                                valign: "middle"
+                                size_hint_x: 0.40
+
+                        MDSeparator:
+                            size_hint_y: None
+                            height: dp(1)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(32)
+                            MDLabel:
+                                text: "TP1"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                size_hint_x: 0.22
+                                valign: "middle"
+                            MDLabel:
+                                id: tp1_distance
+                                text: "—"
+                                font_style: "Caption"
+                                halign: "center"
+                                valign: "middle"
+                                size_hint_x: 0.38
+                            MDLabel:
+                                id: tp1
+                                text: "—"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                halign: "right"
+                                valign: "middle"
+                                size_hint_x: 0.40
+
+                        MDSeparator:
+                            size_hint_y: None
+                            height: dp(1)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(32)
+                            MDLabel:
+                                text: "TP2"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                size_hint_x: 0.22
+                                valign: "middle"
+                            MDLabel:
+                                id: tp2_distance
+                                text: "—"
+                                font_style: "Caption"
+                                halign: "center"
+                                valign: "middle"
+                                size_hint_x: 0.38
+                            MDLabel:
+                                id: tp2
+                                text: "—"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                halign: "right"
+                                valign: "middle"
+                                size_hint_x: 0.40
+
+                        MDSeparator:
+                            size_hint_y: None
+                            height: dp(1)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(32)
+                            MDLabel:
+                                text: "TP3"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                size_hint_x: 0.22
+                                valign: "middle"
+                            MDLabel:
+                                id: tp3_distance
+                                text: "—"
+                                font_style: "Caption"
+                                halign: "center"
+                                valign: "middle"
+                                size_hint_x: 0.38
+                            MDLabel:
+                                id: tp3
+                                text: "—"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                halign: "right"
+                                valign: "middle"
+                                size_hint_x: 0.40
+
+                        MDSeparator:
+                            size_hint_y: None
+                            height: dp(1)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(32)
+                            MDLabel:
+                                text: "Blended"
+                                font_style: "Caption"
+                                theme_text_color: "Secondary"
+                                size_hint_x: 0.60
+                                valign: "middle"
+                            MDLabel:
+                                id: blended_profit
+                                text: "—"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                halign: "right"
+                                valign: "middle"
+
+                        MDSeparator:
+                            size_hint_y: None
+                            height: dp(1)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(32)
+                            MDLabel:
+                                text: "Exp. Value"
+                                font_style: "Caption"
+                                theme_text_color: "Secondary"
+                                size_hint_x: 0.60
+                                valign: "middle"
+                            MDLabel:
+                                id: expected_value
+                                text: "—"
+                                font_style: "Caption"
+                                halign: "right"
+                                valign: "middle"
+
+                    # BUY / SELL LEVELS
+                    # BUY / SELL levels (heights unified for all screen sizes)
+                    MDBoxLayout:
+                        id: levels_box
+                        orientation: "vertical"
+                        spacing: dp(8)
+                        size_hint_y: None
+                        height: 0
+                        opacity: 0
+
+                        MDBoxLayout:
+                            id: levels_row
+                            orientation: "horizontal"
+                            spacing: dp(8)
+                            size_hint_y: None
+                            height: self.minimum_height
+
+                            # BUY CARD
+                            MDCard:
+                                id: buy_card
+                                focus_behavior: False
+                                ripple_behavior: False
+                                orientation: "vertical"
+                                padding: [dp(10), dp(10), dp(8), dp(6)]
+                                radius: [dp(14)]
+                                elevation: 1
+                                size_hint_x: 1
+                                size_hint_y: None
+                                height: self.minimum_height
+                                md_bg_color: (0.04, 0.10, 0.06, 1) if app.theme_cls.theme_style == "Dark" else (0.94, 1.0, 0.96, 1)
+
+                                MDLabel:
+                                    text: "BUY LEVELS"
+                                    font_style: "Button"
+                                    theme_text_color: "Custom"
+                                    text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                    size_hint_y: None
+                                    height: dp(22)
+                                    halign: "center"
+
+                                MDLabel:
+                                    id: buy_rr
+                                    text: ""
+                                    font_style: "Caption"
+                                    theme_text_color: "Secondary"
+                                    size_hint_y: None
+                                    height: dp(14)
+                                    halign: "center"
+
+                                MDSeparator:
+                                    size_hint_y: None
+                                    height: dp(1)
+
+                                # Entry
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "Entry"
+                                        font_style: "Caption"
+                                        theme_text_color: "Secondary"
+                                        size_hint_x: None
+                                        width: dp(40)
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: buy_entry
+                                        text: "—"
+                                        font_style: "Caption"
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Secondary"
+                                        on_release: root.copy_price(root.ids.buy_entry.text)
+
+                                # SL
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "SL"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                        size_hint_x: 0.28
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: buy_sl
+                                        text: "—"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Custom"
+                                        text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                        on_release: root.copy_price(root.ids.buy_sl.text)
+
+                                # TP1
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "TP1"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        size_hint_x: 0.28
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: buy_tp1
+                                        text: "—"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        on_release: root.copy_price(root.ids.buy_tp1.text)
+
+                                # TP2
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "TP2"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        size_hint_x: 0.28
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: buy_tp2
+                                        text: "—"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        on_release: root.copy_price(root.ids.buy_tp2.text)
+
+                                # TP3
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "TP3"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        size_hint_x: 0.28
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: buy_tp3
+                                        text: "—"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        on_release: root.copy_price(root.ids.buy_tp3.text)
+
+                                # Move SL to (break-even)
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(0)
+                                    opacity: 0
+                                    MDLabel:
+                                        text: "Move SL to"
+                                        font_style: "Caption"
+                                        theme_text_color: "Secondary"
+                                        size_hint_x: 0.55
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: buy_be
+                                        text: ""
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.96, 0.65, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.68, 0.38, 0.0, 1)
+                                        halign: "right"
+                                        valign: "middle"
+
+
+                            # SELL CARD
+                            MDCard:
+                                id: sell_card
+                                focus_behavior: False
+                                ripple_behavior: False
+                                orientation: "vertical"
+                                padding: [dp(10), dp(10), dp(8), dp(6)]
+                                radius: [dp(14)]
+                                elevation: 1
+                                size_hint_x: 1
+                                size_hint_y: None
+                                height: self.minimum_height
+                                md_bg_color: (0.10, 0.04, 0.04, 1) if app.theme_cls.theme_style == "Dark" else (1.0, 0.94, 0.94, 1)
+
+                                MDLabel:
+                                    text: "SELL LEVELS"
+                                    font_style: "Button"
+                                    theme_text_color: "Custom"
+                                    text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                    size_hint_y: None
+                                    height: dp(22)
+                                    halign: "center"
+
+                                MDLabel:
+                                    id: sell_rr
+                                    text: ""
+                                    font_style: "Caption"
+                                    theme_text_color: "Secondary"
+                                    size_hint_y: None
+                                    height: dp(14)
+                                    halign: "center"
+
+                                MDSeparator:
+                                    size_hint_y: None
+                                    height: dp(1)
+
+                                # Entry
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "Entry"
+                                        font_style: "Caption"
+                                        theme_text_color: "Secondary"
+                                        size_hint_x: None
+                                        width: dp(40)
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: sell_entry
+                                        text: "—"
+                                        font_style: "Caption"
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Secondary"
+                                        on_release: root.copy_price(root.ids.sell_entry.text)
+
+                                # SL
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "SL"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                        size_hint_x: 0.28
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: sell_sl
+                                        text: "—"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Custom"
+                                        text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                        on_release: root.copy_price(root.ids.sell_sl.text)
+
+                                # TP1
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "TP1"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        size_hint_x: 0.28
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: sell_tp1
+                                        text: "—"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        on_release: root.copy_price(root.ids.sell_tp1.text)
+
+                                # TP2
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "TP2"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        size_hint_x: 0.28
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: sell_tp2
+                                        text: "—"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        on_release: root.copy_price(root.ids.sell_tp2.text)
+
+                                # TP3
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(44)
+                                    MDLabel:
+                                        text: "TP3"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        size_hint_x: 0.28
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: sell_tp3
+                                        text: "—"
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        halign: "right"
+                                        valign: "middle"
+                                        size_hint_x: 1
+                                    MDIconButton:
+                                        icon: "content-copy"
+                                        size_hint_x: None
+                                        size_hint_y: None
+                                        size: [dp(44), dp(44)]
+                                        icon_size: "18sp"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                        on_release: root.copy_price(root.ids.sell_tp3.text)
+
+                                # Move SL to (break-even)
+                                MDBoxLayout:
+                                    orientation: "horizontal"
+                                    size_hint_y: None
+                                    height: dp(0)
+                                    opacity: 0
+                                    MDLabel:
+                                        text: "Move SL to"
+                                        font_style: "Caption"
+                                        theme_text_color: "Secondary"
+                                        size_hint_x: 0.55
+                                        valign: "middle"
+                                    MDLabel:
+                                        id: sell_be
+                                        text: ""
+                                        font_style: "Caption"
+                                        theme_text_color: "Custom"
+                                        text_color: (0.96, 0.65, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.68, 0.38, 0.0, 1)
+                                        halign: "right"
+                                        valign: "middle"
+
+
+                        # ── MT5 ORDER BUTTONS — below both cards ─────────────
+                        MDBoxLayout:
+                            id: mt5_btn_row
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(52)
+                            spacing: dp(8)
+
+                            MDRaisedButton:
+                                id: mt5_buy_btn
+                                text: "▲  BUY via MT5"
+                                size_hint_x: 1
+                                size_hint_y: None
+                                height: dp(48)
+                                opacity: 0
+                                disabled: True
+                                md_bg_color: (0.06, 0.48, 0.20, 1) if app.theme_cls.theme_style == "Dark" else (0.08, 0.54, 0.24, 1)
+                                on_release: root.on_mt5_order("BUY")
+
+                            MDRaisedButton:
+                                id: mt5_sell_btn
+                                text: "▼  SELL via MT5"
+                                size_hint_x: 1
+                                size_hint_y: None
+                                height: dp(48)
+                                opacity: 0
+                                disabled: True
+                                md_bg_color: (0.58, 0.06, 0.08, 1) if app.theme_cls.theme_style == "Dark" else (0.70, 0.08, 0.12, 1)
+                                on_release: root.on_mt5_order("SELL")
+
+
+                    MDFlatButton:
+                        text: "RESET ALL"
+                        size_hint_x: 1
+                        size_hint_y: None
+                        height: dp(40)
+                        theme_text_color: "Error"
+                        on_release: root.reset()
+
+                    MDLabel:
+                        id: status
+                        text: "Ready"
+                        halign: "center"
+                        font_style: "Caption"
+                        theme_text_color: "Secondary"
+                        size_hint_y: None
+                        height: dp(32)
+                        text_size: self.width, None
+
+        # ══════════════════════════════════════════════════════════════════
+        # TAB 2 — HISTORY
+        # ══════════════════════════════════════════════════════════════════
+        MDBottomNavigationItem:
+            name: "history"
+            text: "History"
+            icon: "history"
+
+            MDBoxLayout:
+                orientation: "vertical"
+
+                MDBoxLayout:
+                    orientation: "horizontal"
+                    size_hint_y: None
+                    height: dp(48)
+                    padding: [dp(14), dp(8), dp(6), dp(4)]
+                    MDLabel:
+                        text: "Recent Calculations"
+                        font_style: "Caption"
+                        theme_text_color: "Secondary"
+                        valign: "middle"
+                    MDFlatButton:
+                        text: "CLEAR ALL"
+                        size_hint_x: None
+                        size_hint_y: None
+                        width: dp(90)
+                        height: dp(36)
+                        theme_text_color: "Error"
+                        on_release: root.clear_history()
+
+                MDSeparator:
+                    size_hint_y: None
+                    height: dp(1)
+
+                ScrollView:
+                    do_scroll_x: False
+                    bar_width: 0
+                    GridLayout:
+                        id: history_list
+                        cols: 1
+                        spacing: dp(8)
+                        padding: [dp(12), dp(10), dp(12), dp(24)]
+                        size_hint_y: None
+                        height: self.minimum_height
+
+        # ══════════════════════════════════════════════════════════════════
+        # TAB 3 — SETTINGS
+        # ══════════════════════════════════════════════════════════════════
+        MDBottomNavigationItem:
+            name: "settings"
+            text: "Settings"
+            icon: "cog-outline"
+
+            ScrollView:
+                do_scroll_x: False
+                bar_width: 0
+                GridLayout:
+                    cols: 1
+                    spacing: dp(14)
+                    padding: [dp(12), dp(14), dp(12), dp(100)]
+                    size_hint_y: None
+                    height: self.minimum_height
+
+                    MDLabel:
+                        text: "TRADE MULTIPLIERS"
+                        font_style: "Overline"
+                        theme_text_color: "Secondary"
+                        size_hint_y: None
+                        height: dp(24)
+                        halign: "center"
+
+                    MDCard:
+                        orientation: "vertical"
+                        padding: [dp(14), dp(12), dp(14), dp(12)]
+                        radius: [dp(14)]
+                        elevation: 1
+                        size_hint_y: None
+                        height: self.minimum_height
+                        md_bg_color: app.theme_cls.bg_dark
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(28)
+                            MDLabel:
+                                text: "SL Multiplier  (ATR ×)"
+                                font_style: "Caption"
+                                valign: "middle"
+                            MDLabel:
+                                id: sl_mult_lbl
+                                text: "1.50×"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (1.0, 0.26, 0.26, 1) if app.theme_cls.theme_style == "Dark" else (0.82, 0.10, 0.10, 1)
+                                halign: "right"
+                                valign: "middle"
+                                size_hint_x: None
+                                width: dp(52)
+
+                        MDLabel:
+                            id: sl_mult_hint
+                            text: ""
+                            font_style: "Caption"
+                            theme_text_color: "Secondary"
+                            size_hint_y: None
+                            height: 0
+                            opacity: 0
+
+                    MDCard:
+                        orientation: "vertical"
+                        padding: [dp(14), dp(10), dp(14), dp(10)]
+                        radius: [dp(14)]
+                        elevation: 0
+                        size_hint_y: None
+                        height: self.minimum_height
+                        md_bg_color: (0.08, 0.11, 0.09, 1) if app.theme_cls.theme_style == "Dark" else (0.93, 0.97, 0.94, 1)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(26)
+                            MDLabel:
+                                text: "TP Ratios  (Unified Risk Model)"
+                                font_style: "Caption"
+                                valign: "middle"
+                            MDLabel:
+                                id: tp1_mult_lbl
+                                text: "FIXED"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                halign: "right"
+                                valign: "middle"
+                                size_hint_x: None
+                                width: dp(52)
+
+                        MDLabel:
+                            id: tp1_mult_hint
+                            text: ""
+                            font_style: "Caption"
+                            theme_text_color: "Custom"
+                            text_color: (0.15, 0.79, 0.36, 0.75) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 0.75)
+                            size_hint_y: None
+                            height: 0
+                            opacity: 0
+
+                        MDLabel:
+                            id: tp2_mult_lbl
+                            text: ""
+                            font_style: "Caption"
+                            theme_text_color: "Custom"
+                            text_color: (0.15, 0.79, 0.36, 0.75) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 0.75)
+                            size_hint_y: None
+                            height: 0
+                            opacity: 0
+
+                        MDLabel:
+                            id: tp2_mult_hint
+                            text: ""
+                            font_style: "Caption"
+                            theme_text_color: "Custom"
+                            text_color: (0.15, 0.79, 0.36, 0.75) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 0.75)
+                            size_hint_y: None
+                            height: 0
+                            opacity: 0
+
+                        MDLabel:
+                            id: tp1_mult_slider
+                            text: ""
+                            size_hint_y: None
+                            height: dp(0)
+
+                        MDLabel:
+                            id: tp2_mult_slider
+                            text: ""
+                            size_hint_y: None
+                            height: dp(0)
+
+                    MDLabel:
+                        text: "EXPECTED VALUE"
+                        font_style: "Overline"
+                        theme_text_color: "Secondary"
+                        size_hint_y: None
+                        height: dp(24)
+                        halign: "center"
+
+                    MDCard:
+                        orientation: "vertical"
+                        padding: [dp(14), dp(12), dp(14), dp(12)]
+                        radius: [dp(14)]
+                        elevation: 1
+                        size_hint_y: None
+                        height: self.minimum_height
+                        md_bg_color: app.theme_cls.bg_dark
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(28)
+                            MDLabel:
+                                text: "Win Rate  (for EV calc)"
+                                font_style: "Caption"
+                                valign: "middle"
+                            MDLabel:
+                                id: win_rate_lbl
+                                text: "50%"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.96, 0.65, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.68, 0.38, 0.0, 1)
+                                halign: "right"
+                                valign: "middle"
+                                size_hint_x: None
+                                width: dp(52)
+
+                        MDSlider:
+                            id: win_rate_slider
+                            min: 20
+                            max: 80
+                            step: 5
+                            value: 50
+                            hint: False
+                            size_hint_y: None
+                            height: dp(36)
+                            on_value: root.on_win_rate(self.value)
+
+                        MDLabel:
+                            id: win_rate_hint
+                            text: "Exp. Value shown in Risk Estimate"
+                            font_style: "Caption"
+                            theme_text_color: "Secondary"
+                            size_hint_y: None
+                            height: dp(18)
+
+                    MDLabel:
+                        text: "MT5 DIRECT ORDERS"
+                        font_style: "Overline"
+                        theme_text_color: "Secondary"
+                        size_hint_y: None
+                        height: dp(24)
+                        halign: "center"
+
+                    MDCard:
+                        orientation: "vertical"
+                        padding: [dp(14), dp(12), dp(14), dp(14)]
+                        radius: [dp(14)]
+                        elevation: 1
+                        size_hint_y: None
+                        height: self.minimum_height
+                        md_bg_color: app.theme_cls.bg_dark
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(44)
+                            padding: [0, 0, dp(10), 0]
+                            MDLabel:
+                                text: "Enable MT5 Order Buttons"
+                                font_style: "Caption"
+                                valign: "middle"
+                            SwitchToggle:
+                                id: mt5_toggle
+                                size_hint_x: None
+                                size_hint_y: None
+                                width: dp(52)
+                                height: dp(28)
+                                active: False
+                                pos_hint: {"center_y": 0.5}
+                                track_color_on: app.theme_cls.primary_color
+                                track_color_off: (0.28, 0.28, 0.30, 1) if app.theme_cls.theme_style == "Dark" else (0.72, 0.72, 0.74, 1)
+                                on_active: root.on_mt5_toggle(self.active)
+
+                        MDBoxLayout:
+                            orientation: "horizontal"
+                            size_hint_y: None
+                            height: dp(34)
+                            spacing: dp(8)
+                            MDLabel:
+                                id: mt5_status_lbl
+                                text: "Disabled"
+                                font_style: "Caption"
+                                theme_text_color: "Secondary"
+                                valign: "middle"
+                            MDRaisedButton:
+                                text: "CONNECT"
+                                size_hint_x: None
+                                size_hint_y: None
+                                width: dp(90)
+                                height: dp(34)
+                                pos_hint: {"center_y": 0.5}
+                                on_release: root.on_mt5_test()
+
+                        MDLabel:
+                            text: "Connects directly to MetaTrader 5 on this computer. MT5 will open automatically if not running."
+                            font_style: "Caption"
+                            theme_text_color: "Secondary"
+                            size_hint_y: None
+                            height: dp(28)
+                            text_size: self.width, None
+
+                    MDRaisedButton:
+                        text: "RESET TO DEFAULTS"
+                        size_hint_x: 1
+                        size_hint_y: None
+                        height: dp(44)
+                        pos_hint: {"center_x": 0.5}
+                        on_release: root.reset_settings()
+
+        # ══════════════════════════════════════════════════════════════════
+        # TAB 4 — POSITIONS
+        # ══════════════════════════════════════════════════════════════════
+        MDBottomNavigationItem:
+            name: "positions"
+            text: "Positions"
+            icon: "chart-timeline-variant"
+
+            MDBoxLayout:
+                orientation: "vertical"
+                size_hint_y: 1
+
+                # ── Account / Equity summary bar ──────────────────────────
+                MDCard:
+                    radius: [0]
+                    elevation: 1
+                    size_hint_y: None
+                    height: dp(60)
+                    padding: [dp(14), dp(6), dp(14), dp(6)]
+                    md_bg_color: (0.04, 0.08, 0.05, 1) if app.theme_cls.theme_style == "Dark" else (0.92, 0.98, 0.94, 1)
+
+                    MDBoxLayout:
+                        orientation: "horizontal"
+                        spacing: dp(8)
+
+                        MDBoxLayout:
+                            orientation: "vertical"
+                            spacing: dp(2)
+                            MDLabel:
+                                id: pos_balance_lbl
+                                text: "Balance: —"
+                                font_style: "Caption"
+                                theme_text_color: "Secondary"
+                                size_hint_y: None
+                                height: dp(22)
+                            MDLabel:
+                                id: pos_equity_lbl
+                                text: "Equity: —"
+                                font_style: "Caption"
+                                theme_text_color: "Custom"
+                                text_color: (0.15, 0.79, 0.36, 1) if app.theme_cls.theme_style == "Dark" else (0.10, 0.64, 0.28, 1)
+                                size_hint_y: None
+                                height: dp(22)
+
+                        MDBoxLayout:
+                            orientation: "vertical"
+                            size_hint_x: None
+                            width: dp(110)
+                            spacing: dp(2)
+                            MDLabel:
+                                id: pos_pnl_lbl
+                                text: "Float: —"
+                                font_style: "Caption"
+                                halign: "right"
+                                theme_text_color: "Primary"
+                                size_hint_y: None
+                                height: dp(22)
+                            MDLabel:
+                                id: pos_count_lbl
+                                text: "— positions"
+                                font_style: "Caption"
+                                theme_text_color: "Secondary"
+                                halign: "right"
+                                size_hint_y: None
+                                height: dp(22)
+
+                # ── Action toolbar ────────────────────────────────────────
+                MDBoxLayout:
+                    orientation: "horizontal"
+                    size_hint_y: None
+                    height: dp(46)
+                    padding: [dp(8), dp(4), dp(8), dp(4)]
+                    spacing: dp(6)
+
+                    MDFlatButton:
+                        text: "↻ REFRESH"
+                        size_hint_x: None
+                        size_hint_y: None
+                        width: dp(88)
+                        height: dp(36)
+                        theme_text_color: "Custom"
+                        text_color: app.theme_cls.primary_color
+                        on_release: root.refresh_positions()
+
+                    MDLabel:
+                        id: pos_last_update_lbl
+                        text: "tap Refresh"
+                        font_style: "Caption"
+                        theme_text_color: "Secondary"
+                        valign: "middle"
+
+                    MDRaisedButton:
+                        text: "CLOSE ALL"
+                        size_hint_x: None
+                        size_hint_y: None
+                        width: dp(92)
+                        height: dp(36)
+                        md_bg_color: (0.60, 0.05, 0.07, 1)
+                        theme_text_color: "Custom"
+                        text_color: [1, 1, 1, 1]
+                        on_release: root.close_all_positions()
+
+                # ── ATR Trail config bar ──────────────────────────────────
+                MDCard:
+                    radius: [dp(8)]
+                    elevation: 0
+                    size_hint_y: None
+                    height: dp(50)
+                    padding: [dp(12), dp(6), dp(12), dp(6)]
+                    margin: [dp(8), dp(2), dp(8), dp(2)]
+                    md_bg_color: (0.08, 0.08, 0.10, 1) if app.theme_cls.theme_style == "Dark" else (0.93, 0.93, 0.96, 1)
+
+                    MDBoxLayout:
+                        orientation: "horizontal"
+                        spacing: dp(8)
+                        MDLabel:
+                            text: "ATR Trail:"
+                            font_style: "Caption"
+                            theme_text_color: "Secondary"
+                            size_hint_x: None
+                            width: dp(70)
+                            valign: "middle"
+                        MDLabel:
+                            text: "Period"
+                            font_style: "Caption"
+                            theme_text_color: "Secondary"
+                            size_hint_x: None
+                            width: dp(40)
+                            valign: "middle"
+                        MDTextField:
+                            id: trail_period_field
+                            text: "14"
+                            mode: "rectangle"
+                            size_hint_x: None
+                            width: dp(48)
+                            size_hint_y: None
+                            height: dp(36)
+                            input_filter: "int"
+                            on_focus: if self.focus: app.menu.dismiss()
+                        MDLabel:
+                            text: "Mult"
+                            font_style: "Caption"
+                            theme_text_color: "Secondary"
+                            size_hint_x: None
+                            width: dp(32)
+                            valign: "middle"
+                        MDTextField:
+                            id: trail_mult_field
+                            text: "1.5"
+                            mode: "rectangle"
+                            size_hint_x: None
+                            width: dp(52)
+                            size_hint_y: None
+                            height: dp(36)
+                            input_filter: "float"
+                            on_focus: if self.focus: app.menu.dismiss()
+
+                MDSeparator:
+                    size_hint_y: None
+                    height: dp(1)
+
+                # ── Position cards list (RecycleView — renders only visible cards) ──
+                MDLabel:
+                    id: pos_empty_lbl
+                    text: "No open positions"
+                    font_style: "Caption"
+                    theme_text_color: "Secondary"
+                    halign: "center"
+                    size_hint_y: None
+                    height: dp(80)
+                    opacity: 0
+                RecycleView:
+                    id: positions_list
+                    viewclass: "PositionCardRV"
+                    size_hint_y: 1
+                    do_scroll_x: False
+                    bar_width: dp(3)
+                    RecycleBoxLayout:
+                        orientation: "vertical"
+                        spacing: dp(8)
+                        padding: [dp(10), dp(8), dp(10), dp(24)]
+                        default_size_hint: 1, None
+                        default_size: None, dp(238)
+                        size_hint_y: None
+                        height: self.minimum_height
+
+    # ── FIXED NUMPAD — always visible, Mi Calculator style ───────────
+    MDBoxLayout:
+        id: numpad_panel
+        orientation: "vertical"
+        size_hint_y: None
+        height: dp(260)
+        padding: [dp(4), dp(4), dp(4), dp(4)]
+        spacing: dp(4)
+        md_bg_color: (0.05, 0.05, 0.06, 1) if app.theme_cls.theme_style == "Dark" else (0.92, 0.92, 0.93, 1)
+
+        # Active field display bar + minimize toggle
+        MDBoxLayout:
+            id: numpad_bar
+            size_hint_y: None
+            height: dp(42)
+            padding: [dp(10), 0, dp(4), 0]
+            md_bg_color: (0.03, 0.03, 0.04, 1) if app.theme_cls.theme_style == "Dark" else (0.86, 0.86, 0.88, 1)
+            MDLabel:
+                id: numpad_field_label
+                text: "Tap a field to enter value"
+                font_style: "Caption"
+                theme_text_color: "Secondary"
+                valign: "middle"
+                size_hint_x: 0.4
+            MDLabel:
+                id: numpad_value_label
+                text: ""
+                halign: "right"
+                valign: "middle"
+                font_style: "Subtitle1"
+                theme_text_color: "Primary"
+            MDIconButton:
+                id: numpad_toggle_btn
+                icon: "chevron-down"
+                size_hint_x: None
+                width: dp(38)
+                pos_hint: {"center_y": 0.5}
+                theme_icon_color: "Custom"
+                icon_color: app.theme_cls.primary_color
+                on_release: root.toggle_numpad()
+
+        # Row 1: 7  8  9  C
+        MDBoxLayout:
+            id: np_row1
+            size_hint_y: None
+            height: dp(48)
+            spacing: dp(4)
+            MDRaisedButton:
+                text: "7"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("7")
+            MDRaisedButton:
+                text: "8"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("8")
+            MDRaisedButton:
+                text: "9"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("9")
+            MDRaisedButton:
+                text: "C"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: app.theme_cls.primary_color
+                theme_text_color: "Custom"
+                text_color: [1, 1, 1, 1]
+                on_release: root.numpad_key("CLEAR")
+
+        # Row 2: 4  5  6  ⌫
+        MDBoxLayout:
+            id: np_row2
+            size_hint_y: None
+            height: dp(48)
+            spacing: dp(4)
+            MDRaisedButton:
+                text: "4"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("4")
+            MDRaisedButton:
+                text: "5"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("5")
+            MDRaisedButton:
+                text: "6"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("6")
+            MDRaisedButton:
+                text: "DEL"
+                size_hint_x: 1
+                font_size: "16sp"
+                md_bg_color: app.theme_cls.primary_color
+                theme_text_color: "Custom"
+                text_color: [1, 1, 1, 1]
+                on_release: root.numpad_key("DEL")
+
+        # Row 3: 1  2  3  .
+        MDBoxLayout:
+            id: np_row3
+            size_hint_y: None
+            height: dp(48)
+            spacing: dp(4)
+            MDRaisedButton:
+                text: "1"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("1")
+            MDRaisedButton:
+                text: "2"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("2")
+            MDRaisedButton:
+                text: "3"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("3")
+            MDRaisedButton:
+                text: "."
+                size_hint_x: 1
+                font_size: "20sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key(".")
+
+        # Row 4: 0  00  [space]  OK
+        MDBoxLayout:
+            id: np_row4
+            size_hint_y: None
+            height: dp(48)
+            spacing: dp(4)
+            MDRaisedButton:
+                text: "0"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("0")
+            MDRaisedButton:
+                text: "00"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: (0.12, 0.12, 0.14, 1) if app.theme_cls.theme_style == "Dark" else (0.90, 0.90, 0.92, 1)
+                on_release: root.numpad_key("00")
+            Widget:
+                size_hint_x: 1
+            MDRaisedButton:
+                text: "OK"
+                size_hint_x: 1
+                font_size: "18sp"
+                md_bg_color: app.theme_cls.primary_color
+                theme_text_color: "Custom"
+                text_color: [1, 1, 1, 1]
+                on_release: root.numpad_key("DONE")
