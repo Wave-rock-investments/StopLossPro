@@ -364,9 +364,34 @@ def customers(request: Request, q: str = "", db: Session = Depends(get_db)):
 <td>{'🟢 online' if act else '—'}</td>
 <td>{'✓' if u.mfa and u.mfa.is_confirmed else '—'}</td></tr>""")
 
+    pending = db.execute(select(User).where(User.status == AccountStatus.PENDING)
+                         .order_by(User.created_at.asc()).limit(100)).scalars().all()
+    pending_rows = "".join(f"""<tr>
+<td>{_h(p.email)}</td>
+<td>{_h(p.full_name or '—')}</td>
+<td>{p.created_at.strftime('%Y-%m-%d %H:%M')}</td>
+<td style="display:flex;gap:6px;align-items:center">
+ <form method="post" action="/admin/signup/{p.id}/approve" style="display:flex;gap:6px;margin:0">
+  <input name="days" type="number" value="365" style="width:70px" title="Licence days">
+  <input name="note" placeholder="Payment note" style="width:160px">
+  <button type="submit">Approve</button>
+ </form>
+ <form method="post" action="/admin/signup/{p.id}/reject" style="margin:0">
+  <button class="danger" type="submit"
+    onclick="return confirm('Reject this signup? They can register again with a different email.')">Reject</button>
+ </form>
+</td></tr>""" for p in pending)
+
+    pending_block = f"""<div class="card"><h3>Pending signups ({len(pending)})</h3>
+<p>Self-registered accounts, awaiting payment reconciliation. Approving creates
+their licence; rejecting closes the account without one.</p>
+<table><tr><th>Email</th><th>Name</th><th>Requested</th><th>Action</th></tr>
+{pending_rows}</table></div>""" if pending else ""
+
     return _page("Customers", f"""
 <form method="get"><input name="q" value="{_h(q)}" placeholder="Search email">
 <button>Search</button></form>
+{pending_block}
 <div class="card"><h3>Create customer</h3>
 <form method="post" action="/admin/customer/create">
  <input name="email" type="email" placeholder="customer@example.com" required>
@@ -378,6 +403,37 @@ def customers(request: Request, q: str = "", db: Session = Depends(get_db)):
 </form></div>
 <table><tr><th>Email</th><th>Account</th><th>Licence</th><th>Expires</th>
 <th>Session</th><th>MFA</th></tr>{''.join(rows) or '<tr><td colspan=6>No customers yet.</td></tr>'}</table>""")
+
+
+@router.post("/admin/signup/{user_id}/approve")
+def approve_signup(user_id: uuid.UUID, request: Request, days: int = Form(default=365),
+                   note: str = Form(default=""), db: Session = Depends(get_db)):
+    a = _require_admin(request)
+    u = db.get(User, user_id)
+    if not u or u.status is not AccountStatus.PENDING:
+        raise HTTPException(404)
+
+    u.status = AccountStatus.ACTIVE
+    db.add(Licence(user_id=u.id, status=LicenceStatus.ACTIVE, activated_at=utcnow(),
+                   expires_at=utcnow() + timedelta(days=max(1, days)),
+                   activation_note=note or None))
+    services.audit(db, "SIGNUP_APPROVED", actor=f"admin:{a['email']}", target_user_id=u.id,
+                   detail=f"licence {days}d; {note}")
+    db.commit()
+    return RedirectResponse(f"/admin/customer/{u.id}", status_code=303)
+
+
+@router.post("/admin/signup/{user_id}/reject")
+def reject_signup(user_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    a = _require_admin(request)
+    u = db.get(User, user_id)
+    if not u or u.status is not AccountStatus.PENDING:
+        raise HTTPException(404)
+
+    u.status = AccountStatus.CLOSED
+    services.audit(db, "SIGNUP_REJECTED", actor=f"admin:{a['email']}", target_user_id=u.id)
+    db.commit()
+    return RedirectResponse("/admin", status_code=303)
 
 
 @router.post("/admin/customer/create")

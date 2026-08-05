@@ -100,6 +100,14 @@ class ConsentRequired(ServiceError):
     code, http_status = "CONSENT_REQUIRED", 403
 
 
+class EmailAlreadyRegistered(ServiceError):
+    code, http_status = "EMAIL_ALREADY_REGISTERED", 409
+
+
+class WeakPassword(ServiceError):
+    code, http_status = "WEAK_PASSWORD", 400
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Audit
 # ══════════════════════════════════════════════════════════════════════════
@@ -158,6 +166,50 @@ def authenticate(db: Session, email: str, password: str, *, ip: str | None = Non
         user.password_hash = security.hash_password(password)
 
     audit(db, "LOGIN_SUCCESS", target_user_id=user.id, ip=ip)
+    db.commit()
+    return user
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PHASE 17 — self-serve registration (account created PENDING, no licence)
+# ══════════════════════════════════════════════════════════════════════════
+# Deliberately does NOT create a Licence and does NOT set status=ACTIVE. A
+# self-registered account can authenticate() to nothing until an admin
+# reviews it in the panel and approves — same manual payment-reconciliation
+# gate every other customer already goes through (see admin.py
+# approve_signup), just with the account/email/password chosen by the
+# customer instead of typed in by the admin. This does not change the
+# offline-sale trust model: nobody gets a working licence without the admin
+# clicking Approve.
+MIN_PASSWORD_LENGTH = 12
+
+
+def register_user(db: Session, email: str, password: str,
+                  full_name: str | None = None, *, ip: str | None = None) -> User:
+    email = (email or "").strip().lower()
+    if len(password or "") < MIN_PASSWORD_LENGTH:
+        raise WeakPassword(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+
+    existing = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+    if existing is not None:
+        # Same response shape as "created" would need care to avoid account
+        # enumeration; a 409 here does leak existence, but this endpoint is
+        # rate-limited per-IP and per-email, and the alternative (silently
+        # pretending success) would leave a genuine new user unable to tell
+        # a real submission failure from a duplicate-email one. Login already
+        # accepts this tradeoff nowhere; registration is a lower-risk surface
+        # (no password oracle — only existence), so it's accepted here too.
+        audit(db, "REGISTER_DUPLICATE_EMAIL", result="FAILURE", detail=email, ip=ip)
+        db.commit()
+        raise EmailAlreadyRegistered("An account with this email already exists.")
+
+    user = User(
+        email=email, full_name=(full_name or None), status=AccountStatus.PENDING,
+        password_hash=security.hash_password(password),
+    )
+    db.add(user)
+    db.flush()
+    audit(db, "REGISTER_PENDING", target_user_id=user.id, ip=ip)
     db.commit()
     return user
 

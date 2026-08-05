@@ -67,6 +67,7 @@ from calc       import TradeSetup, calc_setup, calc_auto_lot, recommend_order_ty
 from activation import (
     _show_activation_blocker, _register_if_new, _is_activated,
     _start_session_heartbeat,   # authenticated licence heartbeat (PHASE 12)
+    _resume_session,            # try to silently restore a saved session (PHASE 17)
 )
 
 # ── Widget classes (must be imported so KV can reference them) ────────────────
@@ -462,6 +463,12 @@ if _splash:
     except Exception: pass
 
 _register_if_new()        # record first install / re-install
+
+_resume_session()         # try to silently restore a saved session (PHASE 17) —
+                           # must run before the activation check below, since
+                           # _is_activated() only reflects this process's
+                           # in-memory state until resume() has had a chance
+                           # to reload + revalidate it from disk (state.bin).
 
 if not _is_activated():
     _activated = _show_activation_blocker()

@@ -32,6 +32,7 @@ import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
@@ -223,6 +224,76 @@ class LicensingProvider:
                 return e.code, {}
         except Exception as exc:
             raise ConnectionError(str(exc)) from exc
+
+    def _get(self, path: str, params: dict | None = None, timeout: int = 10) -> tuple[int, dict]:
+        url = f"{API_BASE}{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": "StopLossPro/2"}, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, json.loads(r.read().decode() or "{}")
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read().decode() or "{}")
+            except Exception:
+                return e.code, {}
+        except Exception as exc:
+            raise ConnectionError(str(exc)) from exc
+
+    # ── registration (self-serve signup, PENDING until admin approves) ──────
+    def register(self, email: str, password: str,
+                 full_name: str | None = None) -> tuple[bool, str, str]:
+        """Returns (ok, code, message). Never authorises anything by itself —
+        the account is created PENDING server-side; only an admin approval
+        (out of band) makes it able to log in."""
+        try:
+            status, body = self._post("/auth/register", {
+                "email": email, "password": password, "full_name": full_name,
+            })
+        except ConnectionError as exc:
+            return False, "NETWORK_UNAVAILABLE", f"Cannot reach the licence server. {exc}"
+
+        if status != 200:
+            d = body.get("detail", body) if isinstance(body, dict) else {}
+            code = d.get("code", "ERROR") if isinstance(d, dict) else "ERROR"
+            msg = d.get("message", "Registration failed.") if isinstance(d, dict) else "Registration failed."
+            return False, code, msg
+        return True, "OK", body.get("message", "Account created.")
+
+    # ── consent (required documents that must be accepted before login) ────
+    def fetch_required_consents(self, email: str) -> tuple[bool, list[dict], str]:
+        """Returns (ok, outstanding, error_message)."""
+        try:
+            status, body = self._get("/consent/required", {"email": email})
+        except ConnectionError as exc:
+            return False, [], f"Cannot reach the licence server. {exc}"
+        if status != 200:
+            return False, [], "Could not load the required agreements."
+        return True, list(body.get("outstanding", [])), ""
+
+    def accept_consent(self, email: str, document: str, version: str) -> bool:
+        try:
+            status, _body = self._post(
+                f"/consent/accept?email={urllib.parse.quote(email)}",
+                {"document": document, "version": version, "accepted": True, "app_version": "1.0.0"},
+            )
+        except ConnectionError:
+            return False
+        return status == 200
+
+    # ── resume (silent re-auth from a persisted session, no password) ──────
+    def resume(self) -> bool:
+        """Try to become authorised from whatever is already saved in DPAPI
+        storage, without prompting for a password. Safe to call with no saved
+        session — it just leaves state as NOT_AUTHENTICATED, same as today.
+        This is what makes 'stay signed in' actually work: it must run BEFORE
+        the app decides whether to show the blocking sign-in screen, not only
+        after the periodic heartbeat loop starts (which is too late — by then
+        the blocking dialog has already been shown once already this launch).
+        """
+        self._heartbeat_once()
+        return self._state.authorised
 
     # ── login ──────────────────────────────────────────────────────────────
     def login(self, email: str, password: str, *, device_public_key: str,

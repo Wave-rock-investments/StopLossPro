@@ -62,6 +62,12 @@ class LoginIn(BaseModel):
     totp_code: str | None = Field(default=None, max_length=10)
 
 
+class RegisterIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=200)
+    full_name: str | None = Field(default=None, max_length=200)
+
+
 class MfaConfirmIn(BaseModel):
     code: str = Field(min_length=6, max_length=6)
 
@@ -91,6 +97,23 @@ def current_session(authorization: str | None = Header(default=None),
 # ══════════════════════════════════════════════════════════════════════════
 # Auth + session
 # ══════════════════════════════════════════════════════════════════════════
+@router.post("/auth/register", tags=["auth"])
+def register(body: RegisterIn, request: Request, db: Session = Depends(get_db)):
+    """Self-serve signup. Creates the account PENDING — no licence, cannot log
+    in — until an admin reviews and approves it in the panel (same manual
+    payment-reconciliation step every customer already goes through)."""
+    ip = client_ip(request)
+    rate_limit(f"register:{ip}", limit=5, window=3600)
+    rate_limit(f"register:{body.email.lower()}", limit=3, window=3600)
+    try:
+        user = services.register_user(db, body.email, body.password, body.full_name, ip=ip)
+    except services.ServiceError as e:
+        raise _err(e)
+    return {"status": "pending", "message":
+            "Account created. An administrator will review and activate it shortly.",
+            "user_id": str(user.id)}
+
+
 @router.post("/auth/login", tags=["auth"])
 def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     ip = client_ip(request)
