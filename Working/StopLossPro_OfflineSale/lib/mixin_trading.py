@@ -78,7 +78,10 @@ class TradingMixin:
                 log.warning("Fetch timed out — unlocking UI")
                 self._fetch_done()
                 self._show_snackbar("Fetch timed out — check MT5 is running and connected")
-        self._fetch_timeout_ev = Clock.schedule_once(_fetch_timeout, 12)
+        # 55s — must stay above mt5_fetch_candle's own 50s watchdog, or this
+        # UI-level timeout fires first and reports "timed out" on a cold
+        # start (MT5 not running yet) that was actually still succeeding.
+        self._fetch_timeout_ev = Clock.schedule_once(_fetch_timeout, 55)
 
         def _ok(data):
             def _ui(_dt):

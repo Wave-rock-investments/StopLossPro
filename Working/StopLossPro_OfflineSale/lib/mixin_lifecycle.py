@@ -93,10 +93,14 @@ class LifecycleMixin:
             # Pre-warm Android Vibrator at 2s so first numpad tap has no jnius lag
             Clock.schedule_once(lambda dt: self._init_vibrator(), 2.0)
             Clock.schedule_once(lambda dt: self._init_ime(), 2.0)
-        # MT5 — load persisted settings; start ping if already enabled
+        # MT5 — load persisted settings; start ping if already enabled.
+        # 0.3s (was 1.2s) — just enough for the main window to finish its
+        # first layout pass before the background ping thread starts;
+        # connecting "instantly" on launch is the point of defaulting
+        # _mt5_enabled to True (see Product Sell.py).
         self._load_mt5_settings()
         if self._mt5_enabled:
-            Clock.schedule_once(lambda dt: self._start_mt5_ping(), 1.2)
+            Clock.schedule_once(lambda dt: self._start_mt5_ping(), 0.3)
         # Auto-update check — runs 3s after startup, non-blocking, silent on error
         Clock.schedule_once(lambda dt: self._check_for_update(), 3.0)
 

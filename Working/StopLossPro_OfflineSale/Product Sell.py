@@ -148,7 +148,12 @@ class Root(
     _stats_key      = ""              # "YYYY_MM" — month rollover detection
     _last_back_ts   = 0.0             # tracks last back-press for exit confirmation
     # ── MT5 ──────────────────────────────────────────────────────────────
-    _mt5_enabled        = False
+    # Default True so a brand-new install auto-connects to MT5 on first
+    # launch instead of requiring the user to find and flip the Settings
+    # toggle first. _load_mt5_settings() overwrites this from the saved
+    # store on every later launch, so a user who explicitly turns MT5 off
+    # stays off — this default only governs the very first run.
+    _mt5_enabled        = True
     _mt5_connected      = False
     _mt5_ping_event     = None
     _mt5_share_on       = False

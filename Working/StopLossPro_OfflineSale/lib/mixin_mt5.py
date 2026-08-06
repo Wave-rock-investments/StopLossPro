@@ -63,7 +63,15 @@ class MT5Mixin:
             self._show_snackbar("Test already in progress…")
             return
         self._mt5_testing = True
-        self._show_snackbar("Connecting to MT5…")
+        # Persistent status label, not a snackbar — the connection check
+        # can legitimately take up to ~45s when MT5 isn't running yet
+        # (we launch it and wait for it to come up and log in to the
+        # broker). A snackbar auto-dismisses after 2s, which made this
+        # look stuck/broken on any machine where the real check took
+        # longer than that — the check was still working, it just wasn't
+        # showing anything anymore. _ping_mt5's _ok/_err below update
+        # this same label once the check actually finishes.
+        self._set_status("Connecting to MT5… (can take up to 30-45s on first launch)")
         _r = weakref.ref(self)
         def _done_testing():
             def _ui(dt):
@@ -126,6 +134,13 @@ class MT5Mixin:
                 r._mt5_connected = data.get('connected', False)
                 log.debug("[EVENT] MT5_PING_OK connected=%s", r._mt5_connected)
                 r._update_mt5_status(); r._apply_mt5_visuals()
+                # Only touch the persistent status label for a manual Test —
+                # the silent 30s background ping should stay silent when
+                # it succeeds instantly, which is the normal case.
+                if getattr(r, '_mt5_testing', False):
+                    r._set_status(
+                        "✓ Connected to MT5" if r._mt5_connected else "MT5 not connected",
+                        "success" if r._mt5_connected else "error")
                 if r._mt5_connected and not was_connected:
                     r._resolve_broker_symbols()
                     Clock.schedule_once(lambda dt: r._start_auto_refresh(), 1.0)
@@ -141,6 +156,8 @@ class MT5Mixin:
                 r._update_broker_sym_label()
                 log.debug("[EVENT] MT5_PING_ERR %s", msg)
                 r._update_mt5_status(); r._apply_mt5_visuals()
+                if getattr(r, '_mt5_testing', False):
+                    r._set_status(msg, "error")
                 if on_done: on_done()
             Clock.schedule_once(_ui, 0)
         mt5_check_status(on_success=_ok, on_error=_err)

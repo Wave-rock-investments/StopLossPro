@@ -58,44 +58,120 @@ def _find_mt5_exe():
             return p
     return None
 
-def _mt5_ensure_init():
-    """Initialize MT5, launching the terminal if not already running."""
+def _mt5_ensure_init(max_wait_s=45):
+    """Initialize MT5, launching the terminal if not already running.
+
+    Two very different situations share this one function, and they need
+    very different amounts of patience:
+      - MT5 already running and logged in → resolves in well under a
+        second; a short probe is correct and we should not make the
+        common case slower than it needs to be.
+      - MT5 not running yet (client opened this app before MT5, or right
+        after a reboot) → we launch terminal64.exe ourselves and then
+        have to wait for it to start, connect to the broker's server,
+        and become IPC-ready. On a slower client PC or a broker with a
+        slow login server this can legitimately take 15-30+ seconds.
+        Giving up early here is exactly what made "connect to MT5" feel
+        broken/slow on a client machine even though nothing was actually
+        stuck — it just needed more time than we were allowing.
+
+    Polls every 1s (instead of blocking in fixed 3s chunks) so a
+    terminal that becomes ready quickly is picked up immediately rather
+    than waiting out a full sleep increment, while still allowing up to
+    `max_wait_s` total for a genuinely slow cold start.
+    """
     if mt5 is None:
         return False
-    if mt5.initialize():
+    # Fast probe: if MT5 is already running and ready, this succeeds
+    # almost instantly — no need to burn the full cold-start budget on
+    # the common "already connected" path.
+    if mt5.initialize(timeout=2000):
         return True
+
     exe = _find_mt5_exe()
-    if exe:
-        try:
-            subprocess.Popen([exe])
-        except Exception as e:
-            log.warning("MT5 launch: %s", e)
-            return False
-        import time as _t
-        for _ in range(6):
-            _t.sleep(3)
-            if mt5.initialize():
-                return True
+    if not exe:
+        return False
+    try:
+        subprocess.Popen([exe])
+    except Exception as e:
+        log.warning("MT5 launch: %s", e)
+        return False
+
+    import time as _t
+    deadline = _t.time() + max_wait_s
+    while _t.time() < deadline:
+        _t.sleep(1)
+        if mt5.initialize(timeout=3000):
+            return True
     return False
 
-def mt5_check_status(on_success, on_error):
+def mt5_check_status(on_success, on_error, timeout_s=50):
+    """MT5 connectivity check, guarded by a hard client-side watchdog.
+
+    Without this watchdog, a machine where mt5.initialize() hangs (common
+    causes: this app and the MT5 terminal not BOTH running elevated /
+    BOTH not elevated, multiple terminal installs, a stuck IPC handle)
+    gets stuck on "Connecting…" forever — the ping thread never returns,
+    `_mt5_pinging` never clears, and every subsequent manual AND
+    automatic 30s ping silently no-ops because `_ping_mt5` skips while a
+    previous ping is "in progress". The watchdog guarantees on_error
+    fires within `timeout_s` regardless of what the native call does, so
+    the UI always reaches a definite state and the user gets an
+    actionable message instead of an indefinite spinner.
+
+    `timeout_s=50` — comfortably above `_mt5_ensure_init`'s own 45s
+    cold-start budget (launching MT5 fresh and waiting for it to connect
+    to the broker's server). An earlier version of this watchdog used
+    15s, which was shorter than a legitimate cold start could take —
+    on a client PC where MT5 wasn't already running when the app
+    launched, that made a connection that would have succeeded in ~20s
+    look like a hard failure instead. This value must stay above
+    _mt5_ensure_init's max_wait_s or the same bug comes back.
+    """
+    done = threading.Event()
+
     def _run():
         try:
             if not _mt5_ensure_init():
-                _deliver(on_error, "Cannot connect to MT5"); return
+                if not done.is_set():
+                    done.set()
+                    _deliver(on_error, "Cannot connect to MT5")
+                return
             info = mt5.account_info()
             if info is None:
-                _deliver(on_error, str(mt5.last_error())); return
-            _deliver(on_success, {
-                'connected': True,
-                'account': {
-                    'balance': info.balance, 'equity': info.equity,
-                    'currency': info.currency, 'name': info.name, 'server': info.server,
-                }
-            })
+                if not done.is_set():
+                    done.set()
+                    _deliver(on_error, str(mt5.last_error()))
+                return
+            if not done.is_set():
+                done.set()
+                _deliver(on_success, {
+                    'connected': True,
+                    'account': {
+                        'balance': info.balance, 'equity': info.equity,
+                        'currency': info.currency, 'name': info.name, 'server': info.server,
+                    }
+                })
         except Exception as e:
-            _deliver(on_error, str(e))
+            if not done.is_set():
+                done.set()
+                _deliver(on_error, str(e))
+
+    def _watchdog():
+        if not done.wait(timeout_s):
+            done.set()
+            log.warning(
+                "mt5_check_status: timed out after %ss without MT5 responding — "
+                "likely a Run-as-Administrator mismatch between MT5 and this "
+                "app, multiple MT5 terminals installed, or a stuck terminal "
+                "process.", timeout_s)
+            _deliver(on_error,
+                "MT5 didn't respond in time. Make sure MT5 and this app are "
+                "BOTH run as Administrator (or both NOT as Administrator), "
+                "only one MT5 terminal is open, then try again.")
+
     threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=_watchdog, daemon=True).start()
 
 def mt5_place_order(symbol, order_type, volume, price, sl, tp, comment,
                     on_success, on_error):
@@ -279,11 +355,44 @@ def mt5_place_order(symbol, order_type, volume, price, sl, tp, comment,
         log.error("mt5_place_order: failed to start thread: %s", _te)
         _deliver(on_error, f"Thread start failed: {_te}")
 
-def mt5_fetch_candle(symbol, timeframe, period, on_success, on_error):
+def mt5_fetch_candle(symbol, timeframe, period, on_success, on_error, timeout_s=50):
+    """Fetch the last closed candle + ATR, guarded by a hard watchdog.
+
+    `mt5.copy_rates_from_pos()` is the most likely single call in this
+    whole app to stall in the field: if the requested symbol has never
+    been opened as a chart in this MT5 terminal, the broker hasn't
+    cached its history locally yet and this call blocks synchronously
+    while MT5 downloads it from the broker's server — which can take far
+    longer than a user will wait, especially on a slow VPS/broker link.
+    `_mt5_ensure_init()` inside here can also hang for the same reasons
+    as in mt5_check_status (admin-privilege mismatch, stale IPC handle) —
+    a successful Settings "Connected" ping does NOT guarantee this call
+    won't stall, since MT5's Python bridge re-attaches per call.
+
+    The FETCH button already has its own 12s Clock-based UI timeout
+    (mixin_trading.py::on_fetch) that unlocks the button, but that only
+    resets the UI — it doesn't stop the underlying native call, so a
+    second click can still see the same worker thread stuck. This
+    watchdog guarantees mt5.* work for THIS request stops mattering to
+    the caller within `timeout_s` regardless of what the native call
+    does underneath.
+    """
+    done = threading.Event()
+
+    def _ok(payload):
+        if not done.is_set():
+            done.set()
+            _deliver(on_success, payload)
+
+    def _err(msg):
+        if not done.is_set():
+            done.set()
+            _deliver(on_error, msg)
+
     def _run():
         try:
             if mt5 is None or not _mt5_ensure_init():
-                _deliver(on_error, "MT5 not connected"); return
+                _err("MT5 not connected"); return
             tf_map = {
                 'M1': mt5.TIMEFRAME_M1,  'M5':  mt5.TIMEFRAME_M5,
                 'M15': mt5.TIMEFRAME_M15,'M30': mt5.TIMEFRAME_M30,
@@ -293,7 +402,8 @@ def mt5_fetch_candle(symbol, timeframe, period, on_success, on_error):
             tf = tf_map.get(timeframe, mt5.TIMEFRAME_H1)
             rates = mt5.copy_rates_from_pos(symbol, tf, 0, period + 2)
             if rates is None or len(rates) < 2:
-                _deliver(on_error, "No candle data from MT5"); return
+                _err("No candle data from MT5 — open this symbol's chart in "
+                     "MT5 once so it has history cached, then try again"); return
 
             # Index -2 is the previous completed candle (index -1 is current active candle)
             last = rates[-2]
@@ -329,7 +439,7 @@ def mt5_fetch_candle(symbol, timeframe, period, on_success, on_error):
             c_low   = _get_val(last, 'low',   c_close)
             c_time  = int(_get_val(last, 'time', 0))
 
-            _deliver(on_success, {
+            _ok({
                 'close':       c_close,
                 'open':        c_open,
                 'high':        c_high,
@@ -341,8 +451,24 @@ def mt5_fetch_candle(symbol, timeframe, period, on_success, on_error):
             })
         except Exception as e:
             log.warning("mt5_fetch_candle exception: %s", e)
-            _deliver(on_error, f"Candle fetch error: {e}")
+            _err(f"Candle fetch error: {e}")
+
+    def _watchdog():
+        if not done.wait(timeout_s):
+            done.set()
+            log.warning(
+                "mt5_fetch_candle: timed out after %ss fetching %s/%s — "
+                "likely MT5 downloading history for this symbol for the "
+                "first time, or the same admin-mismatch/IPC issue as "
+                "mt5_check_status.", timeout_s, symbol, timeframe)
+            _deliver(on_error,
+                "MT5 didn't respond in time. In MT5, open a chart for this "
+                "symbol once so its price history is cached locally, make "
+                "sure MT5 and this app are both run as Administrator (or "
+                "both not), then try FETCH again.")
+
     threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=_watchdog, daemon=True).start()
 
 def mt5_get_account(on_success, on_error):
     def _run():
