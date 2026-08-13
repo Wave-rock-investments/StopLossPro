@@ -123,10 +123,12 @@ class TradingMixin:
                 self._fetch_done()
                 return
 
-            # Previous candle LOW is used for trade entry (limit-order fix,
-            # matches the fix shipped to P1/P2 on 2026-07-21). Falls back to
-            # close for any bridge path that doesn't return low.
-            entry_price = low if low > 0 else close
+            # Previous candle CLOSE is used for trade entry — changed
+            # 2026-08-06 at the user's request ("execute orders in closing
+            # only"), replacing the earlier LOW-based entry (that fix
+            # shipped to P1/P2 on 2026-07-21). `low` is still parsed above
+            # for any other OHLC use, but no longer feeds entry price.
+            entry_price = close
 
             # Block duplicate fetch: only update when a new candle has closed
             key       = f"{base_sym}_{tf}"
