@@ -55,6 +55,8 @@ real ones" — that's why this section exists.
 | `ADMIN_SESSION_SECRET` | Yes | Independent value, not reused from `ADAPTER_API_KEYS` |
 | `ADMIN_BOOTSTRAP_TOKEN` | Once, then optional | Used only to create the first admin account |
 | `PAYMENT_PROVIDER` | Yes | `manual` today — see §6, this is a real open decision |
+| `REDIS_URL` | Recommended (required if >1 worker) | See §3a — rate limiting falls back to a single-process in-memory counter without it |
+| `TRUST_PROXY_HEADERS` | Only if behind a reverse proxy/load balancer | `false` by default; enabling it without a proxy that strips inbound `X-Forwarded-For` lets a client spoof its own rate-limit identity — see `app/rate_limit.py` |
 
 Generate high-entropy secrets with:
 
@@ -77,12 +79,38 @@ migration in the current history — `alembic downgrade -1` is safe if a
 rollback is ever needed, but confirm against the specific revision's
 `downgrade()` before relying on it in production.
 
-**Backup strategy** (PostgreSQL, once hosted):
-- Nightly `pg_dump` (or the hosting platform's managed backup — e.g.
-  Render/RDS automated snapshots) with at least 7 days of retention.
-- Before every `alembic upgrade head` in production, take an ad-hoc backup
-  in addition to the nightly one — migrations here are additive today, but
-  that should be re-verified per-migration going forward, not assumed.
+**Backup strategy** (PostgreSQL, once hosted) — **documented here, not yet
+configured**; nothing in this repo runs a backup today, and this section
+must not be read as a claim that one exists until an operator actually
+turns it on:
+
+- **Frequency**: nightly full `pg_dump` (or the hosting platform's managed
+  automated snapshot — e.g. Render/RDS/Neon daily backups) as the baseline.
+  If/when a real payment provider goes live, increase to at least every 6
+  hours — a day of lost payment/subscription state is a materially
+  different risk than a day of lost dev data.
+- **Retention**: minimum 7 daily backups plus 4 weekly backups (28 days),
+  matching the common managed-Postgres default tier — adjust upward if the
+  hosting platform's compliance requirements (see
+  `COMPLIANCE_REQUIREMENTS.md`) end up requiring longer.
+- **Restore procedure**: `pg_restore --clean --if-exists -d <target_db>
+  <backup_file>` against a **separate** restore-target database first,
+  never directly over a live database. After restoring, run `alembic
+  current` against the restored copy and confirm it matches the revision
+  the backup was taken at (`alembic history` shows the expected chain) —
+  do not assume the backup's schema matches `HEAD` if migrations ran
+  between the backup and the incident.
+- **Recovery expectations**: state an explicit RPO/RTO once real traffic
+  exists (e.g. "RPO ≤ 24h, RTO ≤ 2h" for a nightly-backup setup) — this
+  document intentionally does not invent numbers for a service that isn't
+  live yet; whoever turns on the real schedule should set these based on
+  the actual backup cadence chosen above.
+- **Verification**: a backup that has never been restored is unverified.
+  At minimum, do one full restore-and-verify drill before the first real
+  subscriber payment, and repeat on a recurring schedule (e.g. monthly) —
+  verification means confirming row counts on `calls`/`subscriptions`/
+  `payments` in the restored copy are plausible, not just that
+  `pg_restore` exited 0.
 - Performance ledger integrity depends on `calls.result_r` and
   `calls.closed_at` never being silently rewritten — master-prompt §33/§60
   ("never delete losing trades," "every correction must produce an audit
@@ -121,6 +149,36 @@ after sending `/start` to the bot. The route 404s on a missing/wrong
 secret by design (`app/api.py::telegram_webhook`) — a 404 from Telegram's
 side after registering means the secret in the URL doesn't match
 `TELEGRAM_WEBHOOK_SECRET` on the server.
+
+## 5a. Rate limiting & Redis (Phase 9)
+
+Every externally reachable route is rate-limited (`app/rate_limit.py`) —
+admin login/bootstrap and the Telegram webhook per-IP, admin
+reads/writes per authenticated admin, StopLossPro adapter traffic per API
+key (generous limits — a safety net against a runaway caller, not an
+abuse defense, since it's authenticated trusted traffic).
+
+**Single-worker launch**: no additional infrastructure required. The
+in-memory backend is correct as long as the app runs as exactly one
+process (e.g. `uvicorn app.main:app` with no `--workers` flag, or a
+platform that runs a single instance).
+
+**Multi-worker / multi-instance**: set `REDIS_URL` before scaling past one
+worker. Without it, each worker keeps its own independent counters and the
+effective rate limit silently multiplies by worker count — the app still
+boots and runs fine, it just isn't actually enforcing the limit you think
+it is. `app/main.py`'s boot log and `Settings.production_warnings()` log a
+loud warning in production if `REDIS_URL` is unset, specifically so this
+doesn't go unnoticed. A managed Redis instance (Render Key Value, AWS
+ElastiCache, Upstash, etc.) is sufficient — Sterling_Room only uses
+`INCR`/`EXPIRE`, no pub/sub, no persistence requirement (`--save ""` /
+ephemeral cache tier is fine).
+
+If Redis is configured but becomes unreachable at runtime, requests are
+allowed through (fail open, loudly logged) rather than the API going down
+— admin login keeps its own separate DB-backed lockout regardless, so
+brute-force protection on the highest-value target doesn't disappear
+during a Redis outage.
 
 ## 6. Payment provider — still an open decision
 
@@ -161,7 +219,13 @@ document doesn't make it.
 - Logs are structured JSON in non-DEBUG environments
   (`app/logging_config.py`) — one JSON object per line on stdout, ready for
   any log aggregator that reads stdout (Render, CloudWatch, etc.) without a
-  separate shipping agent.
+  separate shipping agent. Every log line carries the request's
+  correlation ID (`request_id`, also echoed as the `X-Request-ID` response
+  header) when one is available, so every log line touched by a single
+  inbound request can be grep'd together.
+- Rate-limit events (`rate_limit_exceeded`, scope/identity/limit/
+  retry_after/path) are logged at WARNING from `app/rate_limit.py` —
+  search logs for this message to see who is hitting limits and where.
 - **Not yet built:** a background worker. `app/telegram_bot.py::mark_for_retry()`
   and `app/subscriptions.py::mark_expiring_soon`/`expire_subscriptions`
   exist as functions a scheduled job would call, but nothing currently
@@ -173,7 +237,8 @@ service yet)
 
 1. Provision a host + PostgreSQL — a **separate** database from
    StopLossPro Pro's licensing DB (`Working/backend`) and from any other
-   service in this repo.
+   service in this repo. Provision Redis too if running more than one
+   worker (§5a).
 2. Set every secret in §2 in the host's secret manager, never in a
    committed file.
 3. `alembic upgrade head`

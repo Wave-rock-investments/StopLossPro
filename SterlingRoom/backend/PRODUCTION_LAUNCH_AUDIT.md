@@ -1,5 +1,15 @@
 # Sterling_Room — Production Launch Audit
 
+> **UPDATE (Phase 9, same day, commit `f83d503`):** the "no rate limiting on
+> public-facing routes" blocker called out below (§ readiness score, §
+> remaining blockers, § final launch checklist) is now closed. Every
+> externally reachable route has a scoped, tested rate limiter — see
+> `STERLING_ROOM_FINAL_LAUNCH_REPORT.md` for the full re-audit and current
+> readiness score. The rest of this document is preserved as the original
+> Phase 8 audit record and intentionally NOT edited below this notice,
+> except for the two checklist/blocker lines struck through where Phase 9
+> closed them.
+
 **Release candidate audited:** `1f56193`
 **Date:** 2026-08-16
 **Scope:** verification and launch-preparation only. Feature set frozen per
@@ -149,7 +159,7 @@ at all.
   prepared the spec — `STAGING.md` — it did not provision infrastructure,
   which requires hosting access this environment doesn't have).
 - No background worker scheduling `mark_for_retry`/`mark_expiring_soon`/`expire_subscriptions`.
-- No rate limiting on public-facing routes.
+- ~~No rate limiting on public-facing routes.~~ **Closed in Phase 9** (`app/rate_limit.py`, commit `f83d503`) — see the final launch report.
 - No independent (human, or second-model) security review performed yet.
 - Migrations unverified against real PostgreSQL (SQLite-only so far).
 - Telegram bot logic unverified against the real Telegram network (mocked in all tests).
@@ -199,7 +209,7 @@ send one clearly-marked test call end to end.
 - [ ] Production Telegram bot + 3 channels created per `TELEGRAM_PRODUCTION_SETUP.md`, cutover sequence followed
 - [ ] All production secrets generated fresh and set only in the production secret manager
 - [ ] Background worker decision made: implement scheduling for the three existing-but-unscheduled functions, or explicitly accept manual/cron triggering for launch
-- [ ] Rate limiting added to public-facing routes, or explicitly accepted as a post-launch follow-up with a stated timeline
+- [x] Rate limiting added to public-facing routes — **done, Phase 9** (`app/rate_limit.py`; in-memory + Redis-backed shared-state, 30 tests)
 - [ ] Independent security review completed (a second reviewer, human or model, on `app/admin.py`'s auth flow and the Telegram webhook auth model specifically)
 - [ ] Production deploy executed, `/health`/`/health/ready`/`/monitoring` all green
 - [ ] Webhook registered, `/start` confirmed working against the production bot
