@@ -102,6 +102,14 @@ class Settings(BaseSettings):
     # limit. Default false: trust only the TCP-level peer address.
     TRUST_PROXY_HEADERS: bool = False
 
+    # ── Background worker (Phase 10 — launch hardening) ──────────────────────
+    # app/worker.py's loop mode sleeps this long between ticks. Irrelevant in
+    # --once mode (a cron-triggered invocation). 60s default: frequent enough
+    # that a failed Telegram delivery or an expiring subscription is caught
+    # promptly, infrequent enough not to matter for load on a single-digit
+    # req/s service. Tune per deployment, not a value worth over-thinking.
+    WORKER_INTERVAL_SECONDS: int = 60
+
     @property
     def is_production(self) -> bool:
         return self.ENV == "production"

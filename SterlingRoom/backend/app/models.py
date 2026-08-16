@@ -117,6 +117,7 @@ class MessageType(str, enum.Enum):
     EXIT = "EXIT"
     INVALIDATED = "INVALIDATED"
     CANCELLED = "CANCELLED"
+    RESULTS = "RESULTS"  # Phase 10 — automatic post to the Results channel on close
 
 
 class ChatRole(str, enum.Enum):
@@ -273,12 +274,27 @@ class CallMessage(Base):
     telegram_message_id: Mapped[str | None] = mapped_column(String(64))
     message_type: Mapped[MessageType] = mapped_column(SAEnum(MessageType, native_enum=False, length=20), nullable=False)
     message_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)  # sha256, for dedup/trace
+    # The exact text that was (or will be) sent — Phase 10. A background
+    # retry runs in a separate process/request from the one that queued the
+    # message, so it cannot re-render the original text from the Call's
+    # CURRENT state (fields may have changed since, and transient kwargs
+    # like update_text were never persisted anywhere else) — storing the
+    # rendered text is what makes retry actually resend the same content,
+    # not "whatever the call looks like now". Nullable because rows written
+    # before this column existed have no text to retry with (see
+    # app/telegram_bot.py::process_telegram_retries).
+    message_text: Mapped[str | None] = mapped_column(Text)
 
     delivery_status: Mapped[DeliveryStatus] = mapped_column(
         SAEnum(DeliveryStatus, native_enum=False, length=20), default=DeliveryStatus.PENDING, nullable=False,
     )
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
+    # Persisted so retry backoff survives a worker restart (master-prompt
+    # Phase 10: "safe after process restart") — an in-memory-only backoff
+    # clock would reset to "immediately eligible" on every restart and
+    # hammer Telegram instead of backing off.
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -389,6 +405,15 @@ class Subscription(Base):
     start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expiry_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     payment_reference: Mapped[str | None] = mapped_column(String(200))
+    # Set once app/worker.py's subscription-lifecycle job successfully calls
+    # telegram_access.revoke_premium_access() for this subscription — NULL
+    # means "entitlement is gone (EXPIRED/REVOKED) but Telegram access has
+    # not been confirmed pulled yet". Driving the worker off this column
+    # (not off "just transitioned this tick") is what makes revocation safe
+    # after a restart: a crash between the status transition and the
+    # Telegram call leaves this NULL, so the next tick picks it back up
+    # instead of silently never revoking access (master-prompt Phase 10).
+    telegram_access_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)

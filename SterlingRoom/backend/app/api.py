@@ -212,29 +212,58 @@ def transition_call(trade_id: str, body: TransitionIn, db: Session = Depends(get
         raise HTTPException(status_code=422, detail=f"Unknown status {body.new_status!r}")
 
     event_type = _TRANSITION_EVENT_MAP.get(new_status, CallEventType.CALL_UPDATED)
-    try:
-        services.transition_call(db, call, new_status, actor=f"adapter:{call.source}",
-                                  event_type=event_type, detail=body.detail)
-        if new_status in (CallStatus.CLOSED, CallStatus.STOPPED) and body.result_r is not None:
-            call.result_r = body.result_r
-    except services.InvalidTransition as e:
-        db.rollback()
-        _err(e)
-    else:
-        message_type = _TRANSITION_MESSAGE_MAP.get(new_status)
-        if message_type is not None:
-            chat_ids = telegram_bot.resolve_chat_ids(
-                call, free_chat_id=settings.TELEGRAM_FREE_CHAT_ID, premium_chat_id=settings.TELEGRAM_PREMIUM_CHAT_ID,
+
+    # Idempotent retry of the SAME terminal close event (master-prompt Phase
+    # 10 §2: "same close event twice -> one ledger result, one Results
+    # post") — e.g. StopLossPro retrying a CLOSE call whose first response
+    # was lost to a network blip, even though the first attempt already
+    # succeeded server-side. The state machine correctly refuses ANY
+    # transition out of a terminal status (see services.transition_call),
+    # including a re-request of the status it's already in, so that case is
+    # handled here instead: skip the state machine and, deliberately, skip
+    # re-assigning result_r — an already-recorded historical result must
+    # never be silently overwritten by a bare retry (master-prompt §33/§60).
+    # Message/results delivery below still runs either way, and is itself
+    # idempotent via distribute_call's (call, chat, type, content) unique
+    # constraint, so the caller gets a clean 200 in both the first-attempt
+    # and retry cases.
+    already_in_target_status = call.status == new_status and new_status in TERMINAL_CALL_STATUSES
+
+    if not already_in_target_status:
+        try:
+            services.transition_call(db, call, new_status, actor=f"adapter:{call.source}",
+                                      event_type=event_type, detail=body.detail)
+            if new_status in (CallStatus.CLOSED, CallStatus.STOPPED) and body.result_r is not None:
+                call.result_r = body.result_r
+        except services.InvalidTransition as e:
+            db.rollback()
+            _err(e)
+
+    message_type = _TRANSITION_MESSAGE_MAP.get(new_status)
+    if message_type is not None:
+        chat_ids = telegram_bot.resolve_chat_ids(
+            call, free_chat_id=settings.TELEGRAM_FREE_CHAT_ID, premium_chat_id=settings.TELEGRAM_PREMIUM_CHAT_ID,
+        )
+        if chat_ids and settings.telegram_configured:
+            telegram_bot.distribute_call(
+                db, call, message_type, chat_ids=chat_ids,
+                reason=body.reason or "", management_instruction=body.management_instruction or "",
+                update_text=body.update_text or "",
             )
-            if chat_ids and settings.telegram_configured:
-                telegram_bot.distribute_call(
-                    db, call, message_type, chat_ids=chat_ids,
-                    reason=body.reason or "", management_instruction=body.management_instruction or "",
-                    update_text=body.update_text or "",
-                )
-        db.commit()
-        db.refresh(call)
-        return CallOut.from_model(call)
+
+    # Results-channel automation (Phase 10 §2): CALL CLOSED -> Performance
+    # Ledger -> Verified R Result -> RESULTS CHANNEL. `call.result_r` is the
+    # SAME authoritative field app/performance.py sums the ledger over —
+    # nothing is recomputed separately for this post.
+    if (new_status in (CallStatus.CLOSED, CallStatus.STOPPED) and call.result_r is not None
+            and settings.TELEGRAM_RESULTS_CHAT_ID and settings.telegram_configured):
+        telegram_bot.distribute_call(
+            db, call, MessageType.RESULTS, chat_ids=[settings.TELEGRAM_RESULTS_CHAT_ID],
+        )
+
+    db.commit()
+    db.refresh(call)
+    return CallOut.from_model(call)
 
 
 # ══════════════════════════════════════════════════════════════════════════

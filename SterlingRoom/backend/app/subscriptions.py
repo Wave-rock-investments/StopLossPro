@@ -11,11 +11,15 @@ subscriptions stay queryable forever (subscriber history requirement).
 """
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import telegram_access
+from app.config import get_settings
 from app.models import (
     Payment,
     PaymentStatus,
@@ -27,6 +31,8 @@ from app.models import (
     TelegramUser,
 )
 from app.services import ServiceError, InvalidTransition, audit
+
+log = logging.getLogger("sterling.subscriptions")
 
 
 class SubscriberNotFound(ServiceError):
@@ -238,6 +244,133 @@ def expire_subscriptions(db: Session) -> list[Subscription]:
     for s in subs:
         _transition(db, s, SubscriptionStatus.EXPIRED, actor="system:expiry_job", event_type="SUBSCRIPTION_EXPIRED")
     return subs
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Telegram access revocation for lapsed entitlement (Phase 10 §1) — driven
+# off `Subscription.telegram_access_revoked_at`, NOT off "just expired this
+# tick", specifically so it survives a worker restart: a crash between
+# expire_subscriptions() committing and the Telegram call would otherwise
+# silently leave a lapsed subscriber's premium access in place forever.
+# ══════════════════════════════════════════════════════════════════════════
+_REVOKE_ELIGIBLE_STATUSES = (SubscriptionStatus.EXPIRED, SubscriptionStatus.REVOKED)
+
+
+def revoke_lapsed_telegram_access(db: Session, *, now: datetime | None = None) -> "AccessRevocationStats":
+    """For every subscription whose entitlement is gone (EXPIRED or
+    REVOKED) but whose Telegram access has not been confirmed pulled yet
+    (telegram_access_revoked_at IS NULL), calls
+    telegram_access.revoke_premium_access() and records the timestamp only
+    on a confirmed success — so a failed attempt (network blip, missing bot
+    permissions) is retried on the next call rather than silently
+    abandoned, while a succeeded one is never re-attempted (idempotent, "no
+    duplicate access/revocation" per master-prompt Phase 10 §1). Commits
+    per subscription so partial progress survives a crash mid-batch.
+    """
+    settings = get_settings()
+    now = now or datetime.now(timezone.utc)
+    stats = AccessRevocationStats()
+
+    if not settings.telegram_configured or not settings.TELEGRAM_PREMIUM_CHAT_ID:
+        # Dev/staging/not-yet-configured — nothing to revoke against. One
+        # summary line, not one per pending subscription.
+        pending = db.execute(
+            select(Subscription).where(
+                Subscription.status.in_(_REVOKE_ELIGIBLE_STATUSES),
+                Subscription.telegram_access_revoked_at.is_(None),
+            )
+        ).scalars().all()
+        stats.skipped_not_configured = len(pending)
+        if pending:
+            log.warning(
+                "telegram_access_revoke_skipped_not_configured",
+                extra={"pending_count": len(pending)},
+            )
+        return stats
+
+    candidates = db.execute(
+        select(Subscription).where(
+            Subscription.status.in_(_REVOKE_ELIGIBLE_STATUSES),
+            Subscription.telegram_access_revoked_at.is_(None),
+        )
+    ).scalars().all()
+
+    for sub in candidates:
+        stats.candidates += 1
+        telegram_user_id = sub.subscriber.telegram_user.telegram_user_id
+        result = telegram_access.revoke_premium_access(
+            settings.TELEGRAM_BOT_TOKEN, settings.TELEGRAM_PREMIUM_CHAT_ID, telegram_user_id,
+        )
+        if result.ok:
+            sub.telegram_access_revoked_at = now
+            stats.revoked += 1
+            stats.subscription_ids.append(str(sub.id))
+            audit(db, "TELEGRAM_ACCESS_REVOKED", actor="system:lifecycle_job",
+                  detail=f"subscription_id={sub.id} status={sub.status.value}")
+            log.info(
+                "telegram_access_revoked", extra={
+                    "subscription_id": str(sub.id), "status": sub.status.value,
+                    "telegram_user_id": telegram_user_id,
+                },
+            )
+        else:
+            stats.failed += 1
+            log.warning(
+                "telegram_access_revoke_failed", extra={
+                    "subscription_id": str(sub.id), "status": sub.status.value,
+                    "telegram_user_id": telegram_user_id, "error": result.error,
+                },
+            )
+        # Per-subscription commit — see module docstring on this function.
+        db.commit()
+
+    return stats
+
+
+@dataclass
+class AccessRevocationStats:
+    candidates: int = 0
+    revoked: int = 0
+    failed: int = 0
+    skipped_not_configured: int = 0
+    subscription_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LifecycleStats:
+    """One tick's worth of subscription-lifecycle results — mirrors
+    app/telegram_bot.py's RetryRunStats shape so app/worker.py can log both
+    jobs the same way."""
+    marked_expiring_soon: int = 0
+    expired: int = 0
+    access: "AccessRevocationStats" = field(default_factory=lambda: AccessRevocationStats())
+    subscription_ids: list[str] = field(default_factory=list)
+
+
+def run_lifecycle_job(db: Session, *, now: datetime | None = None) -> LifecycleStats:
+    """The subscription-lifecycle background job (master-prompt Phase 10
+    §1). Idempotent and safe after a restart: mark_expiring_soon() and
+    expire_subscriptions() both filter on the CURRENT status in their own
+    WHERE clause, so calling them again finds nothing left to do for a
+    subscription already moved — and revoke_lapsed_telegram_access() is
+    itself independently idempotent (see its docstring). Runs all three in
+    sequence, each committed before the next starts.
+    """
+    now = now or datetime.now(timezone.utc)
+    stats = LifecycleStats()
+
+    expiring_soon = mark_expiring_soon(db)
+    db.commit()
+    stats.marked_expiring_soon = len(expiring_soon)
+    stats.subscription_ids.extend(str(s.id) for s in expiring_soon)
+
+    expired = expire_subscriptions(db)
+    db.commit()
+    stats.expired = len(expired)
+    stats.subscription_ids.extend(str(s.id) for s in expired)
+
+    stats.access = revoke_lapsed_telegram_access(db, now=now)
+    return stats
 
 
 # ══════════════════════════════════════════════════════════════════════════

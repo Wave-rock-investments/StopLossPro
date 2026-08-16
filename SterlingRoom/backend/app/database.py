@@ -28,6 +28,15 @@ if settings.is_sqlite:
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA foreign_keys=ON")
         cur.execute("PRAGMA journal_mode=WAL")
+        # Without this, a second connection trying to write while another
+        # holds the write lock gets an immediate "database is locked"
+        # error instead of waiting — WAL mode helps concurrent READERS,
+        # concurrent WRITERS still serialize on one lock either way. 15s
+        # covers the worker (app/worker.py) and API process ever touching
+        # the same SQLite file concurrently in a dev/single-file setup,
+        # plus real-world contention spikes; irrelevant once on real
+        # PostgreSQL in production.
+        cur.execute("PRAGMA busy_timeout=15000")
         cur.close()
 
 

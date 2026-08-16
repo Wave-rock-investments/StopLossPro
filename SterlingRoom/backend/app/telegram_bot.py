@@ -29,7 +29,7 @@ import logging
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -43,6 +43,15 @@ log = logging.getLogger("sterling.telegram_bot")
 _API_TIMEOUT_S = 12
 _MAX_SEND_ATTEMPTS = 3
 _RETRY_BACKOFF_S = (1, 3)  # between attempt 1->2 and 2->3
+
+# ── Background retry (Phase 10) ─────────────────────────────────────────────
+# A message that exhausted _MAX_SEND_ATTEMPTS synchronously (above) is not
+# abandoned — app/worker.py's scheduled job picks it back up, up to this
+# many ADDITIONAL attempts, each spaced further apart than the last so a
+# real Telegram outage doesn't turn into a tight request storm.
+_MAX_BACKGROUND_RETRY_ATTEMPTS = 5
+_MAX_TOTAL_ATTEMPTS = _MAX_SEND_ATTEMPTS + _MAX_BACKGROUND_RETRY_ATTEMPTS  # 8
+_BACKGROUND_BACKOFF_S = (30, 60, 120, 300, 600)  # indexed by retry_count, capped at the last entry
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -98,8 +107,24 @@ def render_tp1_message(call: Call, management_instruction: str = "") -> str:
     return "\n".join(lines)
 
 
+def _format_result_r(result_r) -> str:
+    """Normalizes to float before formatting. `result_r` is a
+    Numeric(8,3) column — SQLAlchemy hands back a plain float for a value
+    just assigned in this same request/session, but a `decimal.Decimal`
+    for one round-tripped through an actual read from the database (e.g.
+    a retried request that re-fetched the Call fresh). Rendering those two
+    representations directly would produce different TEXT for the exact
+    same value ("+3.0R" vs "+3.000R"), which breaks distribute_call's
+    content-hash dedup and would let a retried close event double-post —
+    see app/api.py::transition_call's idempotent-retry handling."""
+    if result_r is None:
+        return "—"
+    r = float(result_r)
+    return f"{'+' if r >= 0 else ''}{r}R"
+
+
 def render_exit_message(call: Call) -> str:
-    result = f"{'+' if (call.result_r or 0) >= 0 else ''}{call.result_r}R" if call.result_r is not None else "—"
+    result = _format_result_r(call.result_r)
     return "\n".join([
         "STERLING_ROOM", "TRADE CLOSED", "",
         "TRADE ID", call.trade_id, "",
@@ -115,12 +140,35 @@ def render_invalidated_message(call: Call, reason: str = "") -> str:
     return "\n".join(lines)
 
 
+def render_results_message(call: Call) -> str:
+    """Results-channel post (Phase 10) — CALL CLOSED -> Performance Ledger
+    -> Verified R Result -> RESULTS CHANNEL. Every field here is read
+    directly off the authoritative `Call` row (the same row
+    app/performance.py sums over for the ledger) — nothing is recomputed
+    independently for Telegram, so this can never drift from what the
+    performance ledger reports for the same trade (master-prompt Phase 10:
+    "do not manually calculate results separately for Telegram").
+    """
+    result = _format_result_r(call.result_r)
+    outcome = "WIN" if (call.result_r or 0) > 0 else ("LOSS" if (call.result_r or 0) < 0 else "BREAKEVEN")
+    return "\n".join([
+        "━━━━━━━━━━━━━━━━",
+        "STERLING_ROOM", "RESULT", "━━━━━━━━━━━━━━━━", "",
+        f"{call.instrument} — {call.direction.value}", "",
+        "TRADE ID", call.trade_id, "",
+        "OUTCOME", outcome, "",
+        "RESULT", result, "",
+        "STATUS", call.status.value,
+    ])
+
+
 _RENDERERS = {
     MessageType.ENTRY: lambda call, **kw: render_entry_message(call),
     MessageType.TP1: lambda call, **kw: render_tp1_message(call, kw.get("management_instruction", "")),
     MessageType.EXIT: lambda call, **kw: render_exit_message(call),
     MessageType.INVALIDATED: lambda call, **kw: render_invalidated_message(call, kw.get("reason", "")),
     MessageType.UPDATE: lambda call, **kw: render_update_message(call, kw.get("update_text", ""), kw.get("update_number", 1)),
+    MessageType.RESULTS: lambda call, **kw: render_results_message(call),
 }
 
 
@@ -223,17 +271,21 @@ def distribute_call(db: Session, call: Call, message_type: MessageType, *, chat_
         msg = existing or CallMessage(
             call_id=call.id, telegram_chat_id=chat_id, message_type=message_type, message_content_hash=h,
         )
+        msg.message_text = text  # persisted so a later background retry can resend exactly this, see models.py
         if existing is None:
             db.add(msg)
             db.flush()
 
         last_error = None
+        now = datetime.now(timezone.utc)
         for attempt in range(_MAX_SEND_ATTEMPTS):
             outcome = _send_telegram_message(settings.TELEGRAM_BOT_TOKEN, chat_id, text)
+            now = datetime.now(timezone.utc)
+            msg.last_attempt_at = now
             if outcome.ok:
                 msg.delivery_status = DeliveryStatus.SENT
                 msg.telegram_message_id = outcome.telegram_message_id
-                msg.sent_at = datetime.now(timezone.utc)
+                msg.sent_at = now
                 msg.error = None
                 break
             last_error = outcome.error
@@ -263,7 +315,128 @@ def resolve_chat_ids(call: Call, *, free_chat_id: str, premium_chat_id: str) -> 
 
 
 def mark_for_retry(db: Session) -> list[CallMessage]:
-    """Not called by anything yet — the hook a future background worker
-    (master-prompt §48 "Telegram delivery") would poll. Documented here
-    rather than silently omitted."""
-    return db.query(CallMessage).filter_by(delivery_status=DeliveryStatus.FAILED).all()
+    """The current FAILED-and-not-yet-exhausted queue — a read-only view
+    used for reporting/tests. app/worker.py's scheduled job calls
+    process_telegram_retries() below to actually act on it, not this."""
+    return (
+        db.query(CallMessage)
+        .filter_by(delivery_status=DeliveryStatus.FAILED)
+        .filter(CallMessage.retry_count < _MAX_TOTAL_ATTEMPTS)
+        .all()
+    )
+
+
+@dataclass
+class RetryRunStats:
+    """One tick's worth of background-retry results — returned so
+    app/worker.py can log a single structured summary line per run rather
+    than one line per message, and so tests can assert on outcomes without
+    re-querying the database."""
+    candidates: int = 0       # FAILED rows considered
+    sent: int = 0              # succeeded this run
+    still_failing: int = 0     # attempted, still failing, will retry again later
+    exhausted: int = 0         # hit _MAX_TOTAL_ATTEMPTS this run — no further retries
+    not_due: int = 0           # FAILED but backoff window hasn't elapsed yet
+    skipped_no_text: int = 0   # FAILED row from before message_text existed — can't safely resend
+    trade_ids: list[str] = field(default_factory=list)  # trade_ids touched (sent or newly exhausted), for logging
+
+
+def _due_for_retry(msg: CallMessage, now: datetime) -> bool:
+    # retry_count already includes the _MAX_SEND_ATTEMPTS synchronous
+    # attempts distribute_call made before ever marking this FAILED — index
+    # the backoff table by how many BACKGROUND retries have happened so
+    # far, not by the raw total, so the first background attempt waits
+    # _BACKGROUND_BACKOFF_S[0] after the synchronous phase ended, not
+    # whatever entry the synchronous attempts already used up.
+    background_attempts = max(0, msg.retry_count - _MAX_SEND_ATTEMPTS)
+    idx = min(background_attempts, len(_BACKGROUND_BACKOFF_S) - 1)
+    last_attempt = msg.last_attempt_at or msg.created_at
+    if last_attempt.tzinfo is None:  # SQLite doesn't round-trip tzinfo — see app/admin.py::_aware for the same pattern
+        last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+    return (now - last_attempt).total_seconds() >= _BACKGROUND_BACKOFF_S[idx]
+
+
+def process_telegram_retries(db: Session, *, now: datetime | None = None) -> RetryRunStats:
+    """The Telegram-retry background job (master-prompt Phase 10 §1).
+    Idempotent and safe to call repeatedly/after a restart: every decision
+    is driven off columns persisted on the CallMessage row itself
+    (retry_count, last_attempt_at, delivery_status), never in-process
+    state, and a message is only ever updated in place — never re-created —
+    so a crash mid-run just means the next call picks up exactly where the
+    last one left off, honoring the same backoff schedule. Commits after
+    each message so partial progress survives a crash later in the batch.
+    """
+    settings = get_settings()
+    now = now or datetime.now(timezone.utc)
+    stats = RetryRunStats()
+
+    candidates = (
+        db.query(CallMessage)
+        .filter_by(delivery_status=DeliveryStatus.FAILED)
+        .order_by(CallMessage.created_at)
+        .all()
+    )
+    for msg in candidates:
+        stats.candidates += 1
+
+        if msg.retry_count >= _MAX_TOTAL_ATTEMPTS:
+            stats.exhausted += 1
+            continue
+        if msg.message_text is None:
+            stats.skipped_no_text += 1
+            log.warning(
+                "telegram_retry_skipped_no_text", extra={
+                    "call_message_id": str(msg.id), "call_id": str(msg.call_id),
+                    "chat_id": msg.telegram_chat_id, "message_type": msg.message_type.value,
+                },
+            )
+            continue
+        if not _due_for_retry(msg, now):
+            stats.not_due += 1
+            continue
+
+        msg.retry_count += 1
+        msg.last_attempt_at = now
+        outcome = _send_telegram_message(settings.TELEGRAM_BOT_TOKEN, msg.telegram_chat_id, msg.message_text)
+        trade_id = msg.call.trade_id if msg.call is not None else None
+
+        if outcome.ok:
+            msg.delivery_status = DeliveryStatus.SENT
+            msg.telegram_message_id = outcome.telegram_message_id
+            msg.sent_at = now
+            msg.error = None
+            stats.sent += 1
+            if trade_id:
+                stats.trade_ids.append(trade_id)
+            log.info(
+                "telegram_retry_succeeded", extra={
+                    "call_message_id": str(msg.id), "trade_id": trade_id,
+                    "chat_id": msg.telegram_chat_id, "attempt": msg.retry_count,
+                },
+            )
+        else:
+            msg.error = outcome.error
+            if msg.retry_count >= _MAX_TOTAL_ATTEMPTS:
+                stats.exhausted += 1
+                if trade_id:
+                    stats.trade_ids.append(trade_id)
+                log.error(
+                    "telegram_retry_exhausted", extra={
+                        "call_message_id": str(msg.id), "trade_id": trade_id,
+                        "chat_id": msg.telegram_chat_id, "attempts": msg.retry_count, "error": outcome.error,
+                    },
+                )
+            else:
+                stats.still_failing += 1
+                log.warning(
+                    "telegram_retry_failed", extra={
+                        "call_message_id": str(msg.id), "trade_id": trade_id,
+                        "chat_id": msg.telegram_chat_id, "attempt": msg.retry_count, "error": outcome.error,
+                    },
+                )
+        # Commit per message, not per batch — a later message's failure (or
+        # the process dying) must not roll back an earlier message's
+        # already-successful send.
+        db.commit()
+
+    return stats
