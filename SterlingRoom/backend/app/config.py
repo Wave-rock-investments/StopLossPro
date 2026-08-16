@@ -51,7 +51,13 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_FREE_CHAT_ID: str = ""
     TELEGRAM_PREMIUM_CHAT_ID: str = ""
-    TELEGRAM_RESULTS_CHAT_ID: str = ""
+    # No separate TELEGRAM_RESULTS_CHAT_ID — per the 2026-08-16 production
+    # Telegram architecture decision there is no separate Results
+    # destination; verified CLOSED/STOPPED results post to
+    # TELEGRAM_FREE_CHAT_ID (see app/api.py::transition_call). A stray
+    # STERLING_TELEGRAM_RESULTS_CHAT_ID left set in an old .env/host secret
+    # is harmless — model_config's extra="ignore" above means it's simply
+    # unused, not an error.
     TELEGRAM_CHANNEL_LINK: str = ""
 
     # ── Interactive bot (Phase 4) ────────────────────────────────────────────

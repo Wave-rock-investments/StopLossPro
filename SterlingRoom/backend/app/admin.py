@@ -645,9 +645,8 @@ def telegram_page(
     )
     cfg_cards = "".join([
         _card("Bot configured", "yes" if settings.telegram_configured else "no", "ok" if settings.telegram_configured else "neg"),
-        _card("Free chat", "set" if settings.TELEGRAM_FREE_CHAT_ID else "unset"),
+        _card("Free chat (also results)", "set" if settings.TELEGRAM_FREE_CHAT_ID else "unset"),
         _card("Premium chat", "set" if settings.TELEGRAM_PREMIUM_CHAT_ID else "unset"),
-        _card("Results chat", "set" if settings.TELEGRAM_RESULTS_CHAT_ID else "unset"),
         _card("Webhook secret", "set" if settings.TELEGRAM_WEBHOOK_SECRET else "unset",
               "" if settings.TELEGRAM_WEBHOOK_SECRET else "neg"),
         _card("Free channel link", "set" if settings.TELEGRAM_FREE_CHANNEL_LINK else "unset"),

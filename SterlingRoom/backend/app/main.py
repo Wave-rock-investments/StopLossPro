@@ -103,7 +103,8 @@ def _startup_guard() -> None:
             "telegram_configured": settings.telegram_configured,
             "telegram_free_chat": _mask_chat_id(settings.TELEGRAM_FREE_CHAT_ID),
             "telegram_premium_chat": _mask_chat_id(settings.TELEGRAM_PREMIUM_CHAT_ID),
-            "telegram_results_chat": _mask_chat_id(settings.TELEGRAM_RESULTS_CHAT_ID),
+            # No separate results chat — verified results post to the free
+            # chat above (2026-08-16 production Telegram architecture).
             "payment_provider": settings.PAYMENT_PROVIDER,
             "rate_limit_backend": "redis" if settings.REDIS_URL else "in-memory",
         },

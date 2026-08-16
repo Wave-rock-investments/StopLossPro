@@ -367,12 +367,61 @@ def results_channel_configured(monkeypatch):
     """Module-level `settings` singletons in app.api/app.telegram_bot are
     captured at import time — env vars set later in a test file never reach
     them (see tests/test_rate_limit.py's identical note for adapter keys).
-    Patch the live objects directly instead."""
+    Patch the live objects directly instead.
+
+    Per the 2026-08-16 production Telegram architecture decision there is
+    no separate results destination — verified results post to
+    TELEGRAM_FREE_CHAT_ID itself (app/api.py::transition_call), so that's
+    what this fixture configures. Kept as "-1003" (its value when this
+    fixture still configured a dedicated results chat) purely to minimize
+    diff noise in the assertions below that filter on that literal."""
     import app.api as api_module
 
-    monkeypatch.setattr(api_module.settings, "TELEGRAM_RESULTS_CHAT_ID", "-1003")
+    monkeypatch.setattr(api_module.settings, "TELEGRAM_FREE_CHAT_ID", "-1003")
     monkeypatch.setattr(api_module.settings, "TELEGRAM_BOT_TOKEN", "fake-token")
     yield
+
+
+def test_results_post_lands_in_the_same_chat_as_free_routed_calls(http_env, results_channel_configured):
+    """Direct proof of the 2026-08-16 production architecture decision:
+    'there is NO separate Results channel' — a call actually routed to the
+    free channel (route_free=True) and that same call's later verified
+    result must land in the identical chat ID, not two different
+    destinations."""
+    client, SessionLocal = http_env
+    with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
+        r = client.post("/api/v1/calls", json={
+            "source_call_id": "res-samechat-1", "instrument": "XAUUSD", "direction": "BUY",
+            "stop_loss": 1900, "route_free": True, "route_premium": False,
+        }, headers=AUTH)
+        trade_id = r.json()["trade_id"]
+        r2 = client.post(f"/api/v1/calls/{trade_id}/events",
+                          json={"new_status": "CLOSED", "result_r": 1.5}, headers=AUTH)
+        assert r2.status_code == 200
+
+    db = SessionLocal()
+    try:
+        call = db.query(Call).filter_by(trade_id=trade_id).one()
+        entry_chat_ids = {
+            m.telegram_chat_id for m in
+            db.query(CallMessage).filter_by(call_id=call.id, message_type=MessageType.ENTRY).all()
+        }
+        results_chat_ids = {
+            m.telegram_chat_id for m in
+            db.query(CallMessage).filter_by(call_id=call.id, message_type=MessageType.RESULTS).all()
+        }
+        assert entry_chat_ids == results_chat_ids == {"-1003"}
+    finally:
+        db.close()
+
+
+def test_settings_has_no_separate_results_chat_id_field():
+    """Guards against the retired TELEGRAM_RESULTS_CHAT_ID setting being
+    reintroduced by accident — per the 2026-08-16 decision, Sterling_Room
+    must not have a separate results destination to configure."""
+    from app.config import get_settings
+
+    assert not hasattr(get_settings(), "TELEGRAM_RESULTS_CHAT_ID")
 
 
 def test_results_channel_posts_on_close(http_env, results_channel_configured):

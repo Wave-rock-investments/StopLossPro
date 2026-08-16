@@ -49,7 +49,7 @@ real ones" — that's why this section exists.
 | `DATABASE_URL` | Yes | PostgreSQL in production — see `assert_production_ready` |
 | `ADAPTER_API_KEYS` | Yes | Comma-separated; rotate by adding new before removing old |
 | `TELEGRAM_BOT_TOKEN` | Yes (once Telegram is live) | From BotFather |
-| `TELEGRAM_FREE_CHAT_ID` / `TELEGRAM_PREMIUM_CHAT_ID` / `TELEGRAM_RESULTS_CHAT_ID` | Yes | The three production channels — see §4 |
+| `TELEGRAM_FREE_CHAT_ID` / `TELEGRAM_PREMIUM_CHAT_ID` | Yes | The two production channels — see §4. No separate results variable: verified results post to `TELEGRAM_FREE_CHAT_ID` itself (2026-08-16 architecture decision). |
 | `TELEGRAM_WEBHOOK_SECRET` | Yes (once bot token is set) | Unguessable path segment — see §5 |
 | `TELEGRAM_FREE_CHANNEL_LINK` | Recommended | Shown by the bot's FREE ACCESS button |
 | `ADMIN_SESSION_SECRET` | Yes | Independent value, not reused from `ADAPTER_API_KEYS` |
@@ -188,25 +188,44 @@ gap, not an ENGINEERING one — see the final report).
 
 ## 4. Telegram channel architecture
 
-Production wants four distinct destinations, three of which the bot
-routes to and one of which is human-run:
+**Production configuration (2026-08-16 — finalized):**
 
-- **FREE CHANNEL** (`TELEGRAM_FREE_CHAT_ID`) — public, `route_free=True` calls
+| Channel | Name | Chat ID | Setting |
+|---|---|---|---|
+| FREE | Sterling_Room | `-1004319935784` | `TELEGRAM_FREE_CHAT_ID` |
+| PREMIUM | SterlingRoom_Premium | `-1004292117841` | `TELEGRAM_PREMIUM_CHAT_ID` |
+
+Bot: `@SterlingroomBot`, already an administrator in both channels.
+
+Two distinct destinations, both bot-routed — **there is no separate
+Results channel**:
+
+- **FREE CHANNEL** (`TELEGRAM_FREE_CHAT_ID`) — public, `route_free=True`
+  calls, market content, premium-conversion content, **and** every
+  verified CLOSED/STOPPED result (see below). This is a deliberate
+  architecture decision, not a gap: Sterling_Room's own free channel is
+  where results are published, by design.
 - **PREMIUM PRIVATE CHANNEL** (`TELEGRAM_PREMIUM_CHAT_ID`) — invite-link-gated
   (`app/telegram_access.py::grant_premium_access`), `route_premium=True` calls
-- **RESULTS CHANNEL** (`TELEGRAM_RESULTS_CHAT_ID`) — automatically posted
-  to on every CALL CLOSED / STOPPED event carrying a `result_r`
-  (`app/api.py::transition_call` → `telegram_bot.distribute_call(...,
-  MessageType.RESULTS, ...)`, Phase 10). The result text is rendered
-  exclusively from `call.result_r` — the same authoritative field the
-  performance ledger sums over — never recomputed separately for
-  Telegram. Retrying the same close event is safe: `distribute_call`'s
-  content-hash dedup on `(call_id, message_type, chat_id)` means a
-  retried request that produces identical result text reuses the
-  existing `CallMessage` row instead of posting a duplicate.
-- **Community group** (optional) — kept **separate** from the three above;
+
+**Results automation** — automatically posted to `TELEGRAM_FREE_CHAT_ID`
+on every CALL CLOSED / STOPPED event carrying a `result_r`
+(`app/api.py::transition_call` → `telegram_bot.distribute_call(...,
+MessageType.RESULTS, chat_ids=[settings.TELEGRAM_FREE_CHAT_ID])`, Phase
+10, re-pointed from a since-retired `TELEGRAM_RESULTS_CHAT_ID` setting on
+2026-08-16). Fires regardless of the individual call's own
+`route_free`/`route_premium` flags — a premium-only call's result still
+gets a verified result post in the free channel. The result text is
+rendered exclusively from `call.result_r` — the same authoritative field
+the performance ledger sums over — never recomputed separately for
+Telegram. Retrying the same close event is safe: `distribute_call`'s
+content-hash dedup on `(call_id, message_type, chat_id)` means a retried
+request that produces identical result text reuses the existing
+`CallMessage` row instead of posting a duplicate.
+
+- **Community group** (optional) — kept **separate** from the two above;
   Sterling_Room's bot does not manage membership in a community group and
-  should not be pointed at one via any of the three `_CHAT_ID` settings
+  should not be pointed at one via either `_CHAT_ID` setting.
 
 ## 5. Registering the Telegram webhook
 

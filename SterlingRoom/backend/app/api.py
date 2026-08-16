@@ -251,14 +251,21 @@ def transition_call(trade_id: str, body: TransitionIn, db: Session = Depends(get
                 update_text=body.update_text or "",
             )
 
-    # Results-channel automation (Phase 10 §2): CALL CLOSED -> Performance
-    # Ledger -> Verified R Result -> RESULTS CHANNEL. `call.result_r` is the
-    # SAME authoritative field app/performance.py sums the ledger over —
-    # nothing is recomputed separately for this post.
+    # Results-channel automation (Phase 10 §2, re-pointed at FREE per the
+    # 2026-08-16 production Telegram architecture decision): CALL CLOSED ->
+    # Performance Ledger -> Verified R Result -> FREE CHANNEL. There is no
+    # separate Results destination — Sterling_Room (`TELEGRAM_FREE_CHAT_ID`)
+    # is itself the results channel, per its documented purpose (free calls,
+    # market content, verified trade results, premium-conversion content).
+    # `call.result_r` is the SAME authoritative field app/performance.py
+    # sums the ledger over — nothing is recomputed separately for this
+    # post, and this fires for every closed/stopped call regardless of that
+    # call's own route_free/route_premium flags (a premium-only call's
+    # result still gets a verified result post in the free channel).
     if (new_status in (CallStatus.CLOSED, CallStatus.STOPPED) and call.result_r is not None
-            and settings.TELEGRAM_RESULTS_CHAT_ID and settings.telegram_configured):
+            and settings.TELEGRAM_FREE_CHAT_ID and settings.telegram_configured):
         telegram_bot.distribute_call(
-            db, call, MessageType.RESULTS, chat_ids=[settings.TELEGRAM_RESULTS_CHAT_ID],
+            db, call, MessageType.RESULTS, chat_ids=[settings.TELEGRAM_FREE_CHAT_ID],
         )
 
     db.commit()

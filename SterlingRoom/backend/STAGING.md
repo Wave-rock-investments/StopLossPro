@@ -18,13 +18,16 @@ destination.** Two ways to guarantee that, in order of preference:
    a staging-only bot was never added to the real channels, so sends
    simply fail (403 "bot is not a member").
 2. **If a second bot isn't available yet**, staging's
-   `TELEGRAM_FREE_CHAT_ID` / `TELEGRAM_PREMIUM_CHAT_ID` /
-   `TELEGRAM_RESULTS_CHAT_ID` must point at the existing Sterling_Room
-   dev/test group (the one already in use throughout Phase 1-8
-   development) and must **never** be set to the real production channel
-   IDs once those exist. This is a manual discipline, not something the
-   app enforces by itself — see the "what code can and can't enforce"
-   note below.
+   `TELEGRAM_FREE_CHAT_ID` / `TELEGRAM_PREMIUM_CHAT_ID` must point at the
+   existing Sterling_Room dev/test group (the one already in use
+   throughout Phase 1-8 development) and must **never** be set to the
+   real production channel IDs (`-1004319935784` / `-1004292117841` — see
+   `TELEGRAM_PRODUCTION_SETUP.md`) now that those exist. This is a manual
+   discipline, not something the app enforces by itself — see the "what
+   code can and can't enforce" note below. There is no separate results
+   channel to isolate — verified results post to `TELEGRAM_FREE_CHAT_ID`
+   itself (`DEPLOYMENT.md` §4), so keeping that one variable pointed at
+   the dev/test group during staging keeps results out of production too.
 
 Whichever option is used, `app/main.py`'s boot log
 (`_startup_guard`) prints `env`, `telegram_configured`, and a masked tail
@@ -75,7 +78,7 @@ prefix on all of them):
 | `DATABASE_URL` | Postgres connection string | Yes |
 | `ADAPTER_API_KEYS` | bearer token(s) for `POST /calls` etc. | Yes |
 | `TELEGRAM_BOT_TOKEN` | bot API token | Only if testing Telegram flows — see §1 |
-| `TELEGRAM_FREE_CHAT_ID` / `TELEGRAM_PREMIUM_CHAT_ID` / `TELEGRAM_RESULTS_CHAT_ID` | destination channels | Only if testing Telegram flows — see §1 |
+| `TELEGRAM_FREE_CHAT_ID` / `TELEGRAM_PREMIUM_CHAT_ID` | destination channels (no separate results variable — see §1) | Only if testing Telegram flows — see §1 |
 | `TELEGRAM_CHANNEL_LINK` | legacy/general channel link | Optional |
 | `TELEGRAM_FREE_CHANNEL_LINK` | shown by the bot's FREE ACCESS button | If testing the bot |
 | `TELEGRAM_SUPPORT_CONTACT` | shown by SUPPORT | Optional |
