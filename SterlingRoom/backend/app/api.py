@@ -151,9 +151,17 @@ def create_call(body: CallIn, db: Session = Depends(get_db), token: str = Depend
         db.rollback()
         _err(e)
     else:
-        chat_ids = telegram_bot.resolve_chat_ids(
-            call, free_chat_id=settings.TELEGRAM_FREE_CHAT_ID, premium_chat_id=settings.TELEGRAM_PREMIUM_CHAT_ID,
-        )
+        # 2026-08-16 production architecture (Gate 3/4): Premium receives
+        # the full call IMMEDIATELY. Free does NOT — it gets a separately
+        # rendered, sanitized teaser only after Call.free_call_due_at
+        # elapses (set in services.create_call), delivered by
+        # app/worker.py's process_delayed_free_calls job. Deliberately NOT
+        # using telegram_bot.resolve_chat_ids() here (that still includes
+        # the free chat, and is still used unchanged for TP1/EXIT/UPDATE/
+        # INVALIDATED messages later in a call's lifecycle — this
+        # immediate-vs-delayed split is scoped to the initial call only,
+        # per the explicit Gate 4 spec).
+        chat_ids = [settings.TELEGRAM_PREMIUM_CHAT_ID] if (call.route_premium and settings.TELEGRAM_PREMIUM_CHAT_ID) else []
         if chat_ids and settings.telegram_configured:
             telegram_bot.distribute_call(db, call, MessageType.ENTRY, chat_ids=chat_ids)
             services.audit(db, "CALL_SENT", actor="system", detail=f"trade_id={call.trade_id} chats={chat_ids}")

@@ -90,6 +90,48 @@ def render_entry_message(call: Call) -> str:
     return "\n".join(lines)
 
 
+def render_free_teaser_message(call: Call) -> str:
+    """Sanitized, delayed Free-channel teaser (2026-08-16 production
+    architecture). Deliberately built from a FIXED, hardcoded template plus
+    only two call fields — instrument and direction — never from
+    call.analysis/call.setup_type/call.invalidation or any of the
+    price/risk fields (entry_min/max, stop_loss, tp1-3, risk_percent).
+
+    That's a stricter reading than the letter of the spec (which allows
+    "general setup"/"market structure" as categories) — those fields are
+    free-text supplied by the adapter/analyst and this renderer cannot
+    algorithmically guarantee they never contain a leaked price or level.
+    Given the explicit STOP CONDITION ("if Free can expose actionable
+    numerical information, do not deploy"), the only version of this
+    renderer that can be verified never to leak is one that structurally
+    cannot: fixed copy, no passthrough of free-form fields. If a richer,
+    still-safe "general context" is wanted later, it needs a real
+    separately-authored sanitized-copy field, not a filter over
+    analyst-supplied text.
+    """
+    arrow = "🔴" if call.direction == CallDirection.SELL else "🟢"
+    return "\n".join([
+        "━━━━━━━━━━━━━━━━",
+        "STERLING_ROOM",
+        "NEW SETUP",
+        "━━━━━━━━━━━━━━━━",
+        "",
+        f"{arrow} {call.instrument} — {call.direction.value}",
+        "",
+        "A new trade setup is live now for Premium members — full entry,",
+        "stop loss, and take-profit levels, managed in real time.",
+        "",
+        "Verified results from every call are posted here once closed.",
+        "",
+        "Want the full call as it happens? Join SterlingRoom_Premium.",
+        "",
+        "TRADE ID",
+        call.trade_id,
+        "",
+        "━━━━━━━━━━━━━━━━",
+    ])
+
+
 def render_update_message(call: Call, update_text: str, update_number: int) -> str:
     return "\n".join([
         "STERLING_ROOM", "TRADE UPDATE", "",
@@ -164,6 +206,7 @@ def render_results_message(call: Call) -> str:
 
 _RENDERERS = {
     MessageType.ENTRY: lambda call, **kw: render_entry_message(call),
+    MessageType.FREE_ENTRY: lambda call, **kw: render_free_teaser_message(call),
     MessageType.TP1: lambda call, **kw: render_tp1_message(call, kw.get("management_instruction", "")),
     MessageType.EXIT: lambda call, **kw: render_exit_message(call),
     MessageType.INVALIDATED: lambda call, **kw: render_invalidated_message(call, kw.get("reason", "")),
@@ -312,6 +355,82 @@ def resolve_chat_ids(call: Call, *, free_chat_id: str, premium_chat_id: str) -> 
     if call.route_free and free_chat_id:
         chats.append(free_chat_id)
     return chats
+
+
+@dataclass
+class FreeCallDeliveryStats:
+    """One tick's worth of delayed-Free-delivery results (2026-08-16
+    production architecture, Gate 4). Idempotent and restart-safe the same
+    way as RetryRunStats above: "has this call already gotten a FREE_ENTRY
+    CallMessage row" is derived from the database on every run, never from
+    in-process state, so a crash mid-batch just means the next tick picks
+    up the calls it hadn't reached yet — and a call that already has a row
+    (whether SENT or FAILED) is never re-queued here; a FAILED one is
+    handed off to process_telegram_retries' normal backoff/retry path
+    instead of being resent from scratch by this job."""
+    candidates: int = 0            # calls past their free_call_due_at
+    sent: int = 0                   # distribute_call invoked for the first time this run
+    already_delivered: int = 0      # already had a FREE_ENTRY row — skipped
+    skipped_not_configured: int = 0  # due, but no Free chat/bot configured
+    trade_ids: list[str] = field(default_factory=list)
+
+
+def process_delayed_free_calls(db: Session, *, now: datetime | None = None) -> FreeCallDeliveryStats:
+    """The delayed/sanitized Free-channel delivery job (2026-08-16
+    production architecture, Gate 4). Premium gets every call immediately
+    with full detail (app/api.py::create_call, unchanged). Free gets a
+    separately-rendered, sanitized teaser (render_free_teaser_message) only
+    once this call's free_call_due_at has passed — this job is what
+    actually sends it, polled from app/worker.py.
+
+    Idempotency: a call is only ever handed to distribute_call here if it
+    has NO existing FREE_ENTRY CallMessage row yet (regardless of that
+    row's status) — so a call whose first attempt failed is retried by the
+    existing process_telegram_retries job's backoff schedule, not
+    re-sent-from-scratch by this job on every tick. Restart-safety follows
+    the same argument as RetryRunStats: due-ness is derived from
+    Call.free_call_due_at (set once, at creation, in app/services.py) and
+    CallMessage row existence — both persisted columns, so a crash between
+    ticks loses nothing.
+    """
+    settings = get_settings()
+    now = now or datetime.now(timezone.utc)
+    stats = FreeCallDeliveryStats()
+
+    due_calls = (
+        db.query(Call)
+        .filter(Call.route_free.is_(True), Call.free_call_due_at.isnot(None), Call.free_call_due_at <= now)
+        .order_by(Call.free_call_due_at)
+        .all()
+    )
+
+    if not due_calls:
+        return stats
+
+    if not settings.telegram_configured or not settings.TELEGRAM_FREE_CHAT_ID:
+        # Logged once for the whole batch, not once per candidate, so a dev
+        # environment with Telegram simply turned off doesn't spam a
+        # WARNING every tick.
+        stats.skipped_not_configured = len(due_calls)
+        log.warning("free_call_delivery_skipped_not_configured", extra={"pending_count": len(due_calls)})
+        return stats
+
+    for call in due_calls:
+        stats.candidates += 1
+        already_queued = db.query(CallMessage).filter_by(
+            call_id=call.id, telegram_chat_id=settings.TELEGRAM_FREE_CHAT_ID, message_type=MessageType.FREE_ENTRY,
+        ).first()
+        if already_queued is not None:
+            stats.already_delivered += 1
+            continue
+
+        distribute_call(db, call, MessageType.FREE_ENTRY, chat_ids=[settings.TELEGRAM_FREE_CHAT_ID])
+        db.commit()  # per-call, not per-batch — matches process_telegram_retries' crash-safety argument
+        stats.sent += 1
+        stats.trade_ids.append(call.trade_id)
+        log.info("free_call_delivered", extra={"trade_id": call.trade_id, "call_id": str(call.id)})
+
+    return stats
 
 
 def mark_for_retry(db: Session) -> list[CallMessage]:

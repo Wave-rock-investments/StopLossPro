@@ -118,6 +118,7 @@ class MessageType(str, enum.Enum):
     INVALIDATED = "INVALIDATED"
     CANCELLED = "CANCELLED"
     RESULTS = "RESULTS"  # Phase 10 — automatic post to the Results channel on close
+    FREE_ENTRY = "FREE_ENTRY"  # 2026-08-16 — sanitized, delayed teaser for the Free channel
 
 
 class ChatRole(str, enum.Enum):
@@ -225,6 +226,16 @@ class Call(Base):
     # Deliberately NOT "every call -> every channel" (master-prompt §26).
     route_free: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     route_premium: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Freemium delivery timing (2026-08-16 production architecture): set at
+    # creation time (created_at + settings.FREE_CALL_DELAY_SECONDS) only
+    # when route_free is True — never recomputed later, so changing the
+    # global delay setting doesn't retroactively move an already-scheduled
+    # call. app/worker.py's process_delayed_free_calls job polls for calls
+    # past this timestamp that don't yet have a FREE_ENTRY CallMessage row
+    # and sends the sanitized teaser then. NULL means "not free-routed, or
+    # free-routed calls created before this feature existed."
+    free_call_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     result_r: Mapped[float | None] = mapped_column(Numeric(8, 3))
 

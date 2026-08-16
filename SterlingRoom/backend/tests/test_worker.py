@@ -382,12 +382,17 @@ def results_channel_configured(monkeypatch):
     yield
 
 
-def test_results_post_lands_in_the_same_chat_as_free_routed_calls(http_env, results_channel_configured):
+def test_results_post_lands_in_the_same_chat_as_the_free_teaser(http_env, results_channel_configured):
     """Direct proof of the 2026-08-16 production architecture decision:
-    'there is NO separate Results channel' — a call actually routed to the
-    free channel (route_free=True) and that same call's later verified
-    result must land in the identical chat ID, not two different
-    destinations."""
+    'there is NO separate Results channel' — a call's delayed Free teaser
+    (once delivered) and that same call's later verified result must land
+    in the identical chat ID, not two different destinations.
+
+    Updated for Gate 3/4 (freemium delay+sanitization): a free-routed call
+    no longer gets an immediate ENTRY message at all — only Premium does.
+    Free gets a separate FREE_ENTRY teaser once process_delayed_free_calls
+    runs past free_call_due_at, which this test triggers directly rather
+    than waiting out the real delay."""
     client, SessionLocal = http_env
     with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
         r = client.post("/api/v1/calls", json={
@@ -402,15 +407,18 @@ def test_results_post_lands_in_the_same_chat_as_free_routed_calls(http_env, resu
     db = SessionLocal()
     try:
         call = db.query(Call).filter_by(trade_id=trade_id).one()
-        entry_chat_ids = {
+        with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
+            telegram_bot.process_delayed_free_calls(db, now=call.free_call_due_at + timedelta(seconds=1))
+
+        free_teaser_chat_ids = {
             m.telegram_chat_id for m in
-            db.query(CallMessage).filter_by(call_id=call.id, message_type=MessageType.ENTRY).all()
+            db.query(CallMessage).filter_by(call_id=call.id, message_type=MessageType.FREE_ENTRY).all()
         }
         results_chat_ids = {
             m.telegram_chat_id for m in
             db.query(CallMessage).filter_by(call_id=call.id, message_type=MessageType.RESULTS).all()
         }
-        assert entry_chat_ids == results_chat_ids == {"-1003"}
+        assert free_teaser_chat_ids == results_chat_ids == {"-1003"}
     finally:
         db.close()
 
@@ -566,6 +574,228 @@ def test_illegal_transition_still_rejected_with_duplicate_retry_handling_in_plac
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Freemium: Premium immediate + full, Free delayed + sanitized
+# (2026-08-16 production architecture, Gate 3/4).
+# ══════════════════════════════════════════════════════════════════════════
+@pytest.fixture()
+def freemium_configured(monkeypatch):
+    """Explicit FREE/PREMIUM chat IDs + bot token for this section's tests
+    — not relying on whatever another test file's os.environ.setdefault
+    happened to set globally (see results_channel_configured's identical
+    note above)."""
+    import app.api as api_module
+
+    monkeypatch.setattr(api_module.settings, "TELEGRAM_FREE_CHAT_ID", "-2001")
+    monkeypatch.setattr(api_module.settings, "TELEGRAM_PREMIUM_CHAT_ID", "-2002")
+    monkeypatch.setattr(api_module.settings, "TELEGRAM_BOT_TOKEN", "fake-token")
+    yield
+
+
+def test_free_teaser_contains_no_execution_numbers(db):
+    """The Gate 4 STOP CONDITION, tested directly: search the rendered Free
+    payload for every execution-critical number on the call and confirm
+    none of them appear anywhere in the text."""
+    call = _make_call(
+        db, direction=CallDirection.BUY, stop_loss=1950.777,
+        entry_min=1948.111, entry_max=1949.222, tp1=1955.333, tp2=1960.444, tp3=1965.555,
+        risk_percent=2.25,
+    )
+    text = telegram_bot.render_free_teaser_message(call)
+    for forbidden in ("1950.777", "1948.111", "1949.222", "1955.333", "1960.444", "1965.555", "2.25"):
+        assert forbidden not in text, f"leaked execution number {forbidden!r} in free teaser: {text}"
+
+
+def test_free_teaser_contains_instrument_and_direction(db):
+    call = _make_call(db, instrument="EURUSD", direction=CallDirection.SELL, stop_loss=1.2)
+    text = telegram_bot.render_free_teaser_message(call)
+    assert "EURUSD" in text
+    assert "SELL" in text
+    assert call.trade_id in text
+
+
+def test_free_teaser_does_not_echo_analysis_or_setup_type_free_text(db):
+    """Defensive test for the exact leak vector the renderer's docstring
+    calls out: free-text fields the adapter/analyst supplies (which could
+    themselves contain a typed-in price) must never be echoed verbatim."""
+    call = _make_call(
+        db, stop_loss=1900, analysis="Enter near 1950.5 with SL at 1900.25 for a clean R:R",
+        setup_type="breakout above 1955.0", invalidation="close below 1890.0",
+    )
+    text = telegram_bot.render_free_teaser_message(call)
+    for leaked in ("1950.5", "1900.25", "1955.0", "1890.0"):
+        assert leaked not in text
+
+
+def test_delayed_free_delivery_skips_calls_not_yet_due(db):
+    _make_call(db, route_free=True, route_premium=False,
+               free_call_due_at=datetime.now(timezone.utc) + timedelta(minutes=10))
+    stats = telegram_bot.process_delayed_free_calls(db)
+    assert stats.candidates == 0
+    assert stats.sent == 0
+
+
+def test_delayed_free_delivery_skips_premium_only_calls(db):
+    """A call with route_free=False (so free_call_due_at is never set, per
+    app/services.py::create_call) must never surface here at all, no
+    matter how much time has passed."""
+    _make_call(db, route_free=False, route_premium=True, free_call_due_at=None)
+    stats = telegram_bot.process_delayed_free_calls(db, now=datetime.now(timezone.utc) + timedelta(days=1))
+    assert stats.candidates == 0
+
+
+def test_delayed_free_delivery_sends_when_due(db, monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "TELEGRAM_FREE_CHAT_ID", "-2001")
+    monkeypatch.setattr(get_settings(), "TELEGRAM_BOT_TOKEN", "fake-token")
+
+    call = _make_call(db, route_free=True, route_premium=False,
+                       free_call_due_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+    with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
+        stats = telegram_bot.process_delayed_free_calls(db)
+
+    assert stats.candidates == 1
+    assert stats.sent == 1
+    assert stats.trade_ids == [call.trade_id]
+    msgs = db.query(CallMessage).filter_by(call_id=call.id, message_type=MessageType.FREE_ENTRY).all()
+    assert len(msgs) == 1
+    assert msgs[0].delivery_status == DeliveryStatus.SENT
+    assert msgs[0].telegram_chat_id == "-2001"
+
+
+def test_delayed_free_delivery_is_idempotent_no_duplicate_on_second_run(db, monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "TELEGRAM_FREE_CHAT_ID", "-2001")
+    monkeypatch.setattr(get_settings(), "TELEGRAM_BOT_TOKEN", "fake-token")
+
+    call = _make_call(db, route_free=True, route_premium=False,
+                       free_call_due_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+    with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
+        telegram_bot.process_delayed_free_calls(db)
+        stats2 = telegram_bot.process_delayed_free_calls(db)
+
+    assert stats2.sent == 0
+    assert stats2.already_delivered == 1
+    msgs = db.query(CallMessage).filter_by(call_id=call.id, message_type=MessageType.FREE_ENTRY).all()
+    assert len(msgs) == 1  # not two
+
+
+def test_delayed_free_delivery_failure_is_handed_off_to_the_retry_job_not_resent(db, monkeypatch):
+    """A failed first attempt must NOT be retried from scratch by this job
+    on the next tick (that would bypass the backoff schedule) — it must be
+    left as a FAILED row for process_telegram_retries to pick up on its own
+    schedule, exactly like any other FAILED CallMessage."""
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "TELEGRAM_FREE_CHAT_ID", "-2001")
+    monkeypatch.setattr(get_settings(), "TELEGRAM_BOT_TOKEN", "fake-token")
+
+    call = _make_call(db, route_free=True, route_premium=False,
+                       free_call_due_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+    with patch("app.telegram_bot._send_telegram_message", side_effect=_fail):
+        stats = telegram_bot.process_delayed_free_calls(db)
+    assert stats.sent == 1  # "sent" here means "distribute_call was invoked", not "delivery succeeded"
+
+    msg = db.query(CallMessage).filter_by(call_id=call.id, message_type=MessageType.FREE_ENTRY).one()
+    assert msg.delivery_status == DeliveryStatus.FAILED
+
+    # Second tick: must NOT re-invoke distribute_call for this call again.
+    stats2 = telegram_bot.process_delayed_free_calls(db)
+    assert stats2.sent == 0
+    assert stats2.already_delivered == 1
+
+    # The existing retry job picks it up once its backoff window elapses.
+    with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
+        retry_stats = telegram_bot.process_telegram_retries(
+            db, now=datetime.now(timezone.utc) + timedelta(seconds=31),
+        )
+    assert retry_stats.sent == 1
+    db.refresh(msg)
+    assert msg.delivery_status == DeliveryStatus.SENT
+
+
+def test_delayed_free_delivery_skipped_cleanly_when_not_configured(db, monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "TELEGRAM_FREE_CHAT_ID", "")
+    call = _make_call(db, route_free=True, route_premium=False,
+                       free_call_due_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+    stats = telegram_bot.process_delayed_free_calls(db)
+    assert stats.skipped_not_configured == 1
+    assert stats.sent == 0
+    assert db.query(CallMessage).filter_by(call_id=call.id).count() == 0
+
+
+def test_create_call_premium_gets_full_immediately_free_gets_nothing_yet(http_env, freemium_configured):
+    """The core Gate 3/4 proof: right after POST /calls, Premium already
+    has the full ENTRY message and Free has NOTHING — no CallMessage row
+    of any type for the free chat exists until the delay job runs."""
+    client, SessionLocal = http_env
+    with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
+        r = client.post("/api/v1/calls", json={
+            "source_call_id": "free-delay-1", "instrument": "XAUUSD", "direction": "BUY",
+            "stop_loss": 1900, "tp1": 1950, "route_free": True, "route_premium": True,
+        }, headers=AUTH)
+        assert r.status_code == 200
+        trade_id = r.json()["trade_id"]
+
+    db = SessionLocal()
+    try:
+        call = db.query(Call).filter_by(trade_id=trade_id).one()
+
+        premium_msgs = db.query(CallMessage).filter_by(
+            call_id=call.id, telegram_chat_id="-2002", message_type=MessageType.ENTRY,
+        ).all()
+        assert len(premium_msgs) == 1
+        assert premium_msgs[0].delivery_status == DeliveryStatus.SENT
+        assert "1900" in premium_msgs[0].message_text  # full stop loss present for Premium
+
+        free_msgs = db.query(CallMessage).filter_by(call_id=call.id, telegram_chat_id="-2001").all()
+        assert len(free_msgs) == 0  # nothing sent to Free yet, at any message type
+
+        assert call.free_call_due_at is not None
+        expected = call.created_at + timedelta(seconds=900)
+        assert abs((call.free_call_due_at - expected).total_seconds()) < 2
+    finally:
+        db.close()
+
+
+def test_delayed_free_job_delivers_after_due_and_matches_immediate_premium_call(http_env, freemium_configured):
+    """End-to-end: create a free+premium call, then simulate the worker
+    tick firing after the delay window — Free gets its sanitized teaser,
+    with no execution numbers, while Premium's original message is
+    untouched."""
+    client, SessionLocal = http_env
+    with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
+        r = client.post("/api/v1/calls", json={
+            "source_call_id": "free-delay-2", "instrument": "GBPUSD", "direction": "SELL",
+            "stop_loss": 1.4321, "route_free": True, "route_premium": True,
+        }, headers=AUTH)
+        trade_id = r.json()["trade_id"]
+
+    db = SessionLocal()
+    try:
+        call = db.query(Call).filter_by(trade_id=trade_id).one()
+        with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
+            stats = telegram_bot.process_delayed_free_calls(
+                db, now=call.free_call_due_at + timedelta(seconds=1),
+            )
+        assert stats.sent == 1
+
+        free_msg = db.query(CallMessage).filter_by(
+            call_id=call.id, telegram_chat_id="-2001", message_type=MessageType.FREE_ENTRY,
+        ).one()
+        assert free_msg.delivery_status == DeliveryStatus.SENT
+        assert "1.4321" not in free_msg.message_text
+        assert "GBPUSD" in free_msg.message_text
+
+        # Premium's original message is untouched by the free delivery job.
+        premium_msg = db.query(CallMessage).filter_by(
+            call_id=call.id, telegram_chat_id="-2002", message_type=MessageType.ENTRY,
+        ).one()
+        assert "1.4321" in premium_msg.message_text
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # app.worker.run_once() — full integration, and restart-safety across
 # independent SessionLocal()s the way a real process restart would look.
 # ══════════════════════════════════════════════════════════════════════════
@@ -633,3 +863,30 @@ def test_run_once_one_job_failing_does_not_prevent_the_other_from_running(worker
 
     assert "error" in summary["telegram_retry"]
     assert "error" not in summary["subscription_lifecycle"]
+    assert "error" not in summary["free_call_delivery"]
+
+
+def test_run_once_includes_and_processes_the_delayed_free_delivery_job(worker_db, monkeypatch):
+    """Confirms the third job (2026-08-16 Gate 3/4) is actually wired into
+    run_once(), not just defined and never called, and that it survives a
+    simulated restart (second tick) the same way the other two jobs do."""
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "TELEGRAM_FREE_CHAT_ID", "-2001")
+    monkeypatch.setattr(get_settings(), "TELEGRAM_BOT_TOKEN", "fake-token")
+
+    db = worker_db()
+    try:
+        _make_call(db, route_free=True, route_premium=False,
+                   free_call_due_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+        db.commit()
+    finally:
+        db.close()
+
+    with patch("app.telegram_bot._send_telegram_message", side_effect=_ok):
+        summary1 = worker.run_once()
+        summary2 = worker.run_once()  # simulated restart / next tick
+
+    assert "free_call_delivery" in summary1
+    assert summary1["free_call_delivery"]["sent"] == 1
+    assert summary2["free_call_delivery"]["sent"] == 0
+    assert summary2["free_call_delivery"]["already_delivered"] == 1

@@ -8,12 +8,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models import (
     AuditEvent,
     Call,
@@ -135,6 +136,17 @@ def create_call(db: Session, payload: dict, *, actor: str) -> Call:
 
     direction = CallDirection(str(payload["direction"]).upper())
 
+    route_free = bool(payload.get("route_free", False))
+    # Freemium delivery timing: computed ONCE, here, from "now" at creation
+    # — never re-derived later from a global setting, so a mid-flight
+    # change to FREE_CALL_DELAY_SECONDS never retroactively reschedules an
+    # already-created call. NULL (not set) for premium-only calls, since
+    # there is nothing to schedule.
+    free_call_due_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=get_settings().FREE_CALL_DELAY_SECONDS)
+        if route_free else None
+    )
+
     for _attempt in range(5):
         trade_id = allocate_unique_trade_id(db)
         call = Call(
@@ -154,8 +166,9 @@ def create_call(db: Session, payload: dict, *, actor: str) -> Call:
             analysis=payload.get("analysis"),
             invalidation=payload.get("invalidation"),
             status=CallStatus.ACTIVE,
-            route_free=bool(payload.get("route_free", False)),
+            route_free=route_free,
             route_premium=bool(payload.get("route_premium", True)),
+            free_call_due_at=free_call_due_at,
         )
         db.add(call)
         try:

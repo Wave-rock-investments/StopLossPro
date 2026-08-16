@@ -6,6 +6,10 @@ schedule until now (per DEPLOYMENT.md's own "Not yet built" note):
 - Telegram delivery retry (app/telegram_bot.py::process_telegram_retries)
 - Subscription lifecycle: mark EXPIRING_SOON, expire, revoke lapsed
   premium Telegram access (app/subscriptions.py::run_lifecycle_job)
+- Delayed/sanitized Free-channel call delivery, 2026-08-16 production
+  architecture (app/telegram_bot.py::process_delayed_free_calls) —
+  Premium gets every call immediately with full detail; Free gets a
+  separate sanitized teaser only after Call.free_call_due_at elapses.
 
 DELIBERATELY NOT Celery/RQ/Kafka/anything requiring a message broker — this
 service runs at a call volume where a broker would be pure overhead, and
@@ -109,6 +113,22 @@ def run_once() -> dict:
         db.rollback()
         log.exception("subscription_lifecycle_job_failed")
         summary["subscription_lifecycle"] = {"error": "job raised — see exception log above"}
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        free_stats = telegram_bot.process_delayed_free_calls(db, now=now)
+        summary["free_call_delivery"] = {
+            "candidates": free_stats.candidates,
+            "sent": free_stats.sent,
+            "already_delivered": free_stats.already_delivered,
+            "skipped_not_configured": free_stats.skipped_not_configured,
+        }
+    except Exception:
+        db.rollback()
+        log.exception("free_call_delivery_job_failed")
+        summary["free_call_delivery"] = {"error": "job raised — see exception log above"}
     finally:
         db.close()
 

@@ -116,6 +116,16 @@ class Settings(BaseSettings):
     # req/s service. Tune per deployment, not a value worth over-thinking.
     WORKER_INTERVAL_SECONDS: int = 60
 
+    # ── Freemium call delivery (2026-08-16 production architecture) ─────────
+    # Premium receives every call immediately with full execution detail.
+    # Free receives a separate, deliberately sanitized teaser (see
+    # app/telegram_bot.py::render_free_teaser_message — no Entry/SL/TP/risk
+    # numbers) only after this delay, via app/worker.py's
+    # process_delayed_free_calls job. 900s (15 min) is the value explicitly
+    # confirmed for production launch — override via
+    # STERLING_FREE_CALL_DELAY_SECONDS if that changes.
+    FREE_CALL_DELAY_SECONDS: int = 900
+
     @property
     def is_production(self) -> bool:
         return self.ENV == "production"
