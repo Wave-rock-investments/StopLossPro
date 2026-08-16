@@ -16,16 +16,17 @@ def _payload(**overrides):
 
 def test_render_entry_message_contains_key_fields(db):
     """2026-08-16 note: this only checks that the key DATA still appears
-    somewhere in the Premium message — the exact 2026-08-16 premium-desk
-    visual redesign (box header, bold Unicode labels, R:R) is covered in
-    depth by tests/test_telegram_message_redesign.py."""
+    somewhere in the Premium message — the exact visual format (simplified
+    2026-08-16 redesign: plain text + emoji, no box/bold; RISK/SETUP/
+    INVALIDATION dropped per the corrected mockup) is covered in depth by
+    tests/test_telegram_message_redesign.py. setup_type is intentionally
+    no longer asserted here — it's no longer rendered, by design."""
     call = services.create_call(db, _payload(), actor="test")
     text = telegram_bot.render_entry_message(call)
     assert call.trade_id in text
     assert "EURUSD" in text
     assert "BUY" in text
     assert telegram_bot._format_price(call.stop_loss) in text
-    assert "Breakout retest" in text
 
 
 def test_distribute_call_success_records_sent(db):

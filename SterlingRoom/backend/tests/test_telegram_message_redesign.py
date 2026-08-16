@@ -1,17 +1,17 @@
-"""2026-08-16 Telegram signal UI redesign — presentation-layer only.
+"""2026-08-16 Telegram signal presentation redesign — presentation-layer
+only, now on its SECOND visual pass:
 
-Verifies every item on the redesign's explicit test checklist. This file
-does NOT re-test call/entry/SL/TP/R:R business logic, delivery routing, the
-15-minute Free delay, or subscription/payment behavior — those are
-unchanged by this redesign and already covered by test_worker.py,
-test_telegram_bot.py, test_services.py, and test_end_to_end.py. What's
-verified here is specifically: the new visual format, that price numbers
-land where they should (Premium) and never where they shouldn't (Free),
-that no bot/channel URL footer exists on any trading-call message, that
-results still come from the one authoritative `calls.result_r` rather than
-a second calculation, and that redesigning the renderers didn't disturb
-distribute_call's dedup/retry mechanics or the StopLossPro adapter's API
-contract.
+  1st pass: box-drawing header + Mathematical Bold labels + R:R per target.
+  2nd pass (this file, current): a direct correction — plain text + standard
+  Unicode emoji, no box, no bold, a single headline R:R, and a distinct
+  STOPPED-vs-SL-HIT result state. The 1st pass's tests (box header, bold
+  transform) no longer apply and have been replaced here rather than left
+  stale.
+
+Does NOT re-test call/entry/SL/TP/R:R-math/result business logic, delivery
+routing, the 15-minute Free delay, or subscription/payment behavior — those
+are unchanged by this redesign and already covered elsewhere (test_worker.py,
+test_telegram_bot.py, test_services.py, test_end_to_end.py).
 """
 import uuid
 
@@ -33,82 +33,148 @@ def _make_call(db, **overrides) -> Call:
     return call
 
 
-# ── 1. Premium message uses the new format ──────────────────────────────
-def test_premium_message_uses_the_new_boxed_format(db):
-    call = _make_call(db)
+# ── 1-2. Premium BUY / Premium SELL ──────────────────────────────────────
+def test_premium_buy_renders_correct_arrow_and_direction(db):
+    call = _make_call(db, direction=CallDirection.BUY)
     text = telegram_bot.render_entry_message(call)
-    assert telegram_bot._BOX_TL in text and telegram_bot._BOX_BR in text  # ╔ ... ╝ boxed header
-    assert telegram_bot._DIVIDER in text  # ━━━ section dividers
-    assert telegram_bot._DIAMOND in text  # ◈ field markers
+    assert "👑 PREMIUM" in text
+    assert "🟢 BUY BTCUSD" in text
+    assert "🔴" not in text
 
 
-# ── 2-6. Premium message contains Entry / SL / TP1 / TP2 / TP3 ──────────
-def test_premium_message_contains_entry_price(db):
+def test_premium_sell_renders_correct_arrow_and_direction(db):
+    # Valid SELL geometry: SL above entry, TPs below entry.
+    call = _make_call(db, direction=CallDirection.SELL, entry_min=1950.0, entry_max=None,
+                       stop_loss=1960.0, tp1=1930.0, tp2=1910.0, tp3=1890.0, instrument="XAUUSD")
+    text = telegram_bot.render_entry_message(call)
+    assert "🔴 SELL XAUUSD" in text
+    assert "🟢" not in text
+
+
+# ── 3. Render Entry ───────────────────────────────────────────────────────
+def test_entry_section_shows_the_entry_price(db):
     call = _make_call(db, entry_min=63209.70, entry_max=None)
     text = telegram_bot.render_entry_message(call)
+    assert "🎯 ENTRY" in text
     assert telegram_bot._format_price(63209.70) in text
 
 
-def test_premium_message_contains_sl_price(db):
-    call = _make_call(db, stop_loss=63123.75)
+def test_entry_shows_market_when_no_entry_price_given(db):
+    call = _make_call(db, entry_min=None, entry_max=None)
     text = telegram_bot.render_entry_message(call)
-    assert telegram_bot._format_price(63123.75) in text
+    assert "MARKET" in text
 
 
-def test_premium_message_contains_tp1_price(db):
+# ── 4-6. Render TP1 / TP2 / TP3 ───────────────────────────────────────────
+def test_tp1_row_present_with_marker_and_price(db):
     call = _make_call(db, tp1=63381.60)
     text = telegram_bot.render_entry_message(call)
-    assert telegram_bot._format_price(63381.60) in text
+    assert f"{telegram_bot._TP1_MARKER}  TP1 — {telegram_bot._format_price(63381.60)}" in text
 
 
-def test_premium_message_contains_tp2_price(db):
+def test_tp2_row_present_with_marker_and_price(db):
     call = _make_call(db, tp2=63467.55)
     text = telegram_bot.render_entry_message(call)
-    assert telegram_bot._format_price(63467.55) in text
+    assert f"{telegram_bot._TP2_MARKER}  TP2 — {telegram_bot._format_price(63467.55)}" in text
 
 
-def test_premium_message_contains_tp3_price(db):
+def test_tp3_row_uses_trophy_marker_not_a_circled_number(db):
     call = _make_call(db, tp3=63553.50)
     text = telegram_bot.render_entry_message(call)
-    assert telegram_bot._format_price(63553.50) in text
+    assert f"🏆  TP3 — {telegram_bot._format_price(63553.50)}" in text
+    assert chr(0x2462) not in text  # ③ — TP3 deliberately does NOT use the old circled-3
 
 
-# ── 7. Premium message contains R:R ──────────────────────────────────────
-def test_premium_message_contains_dynamically_calculated_rr(db):
-    # entry 63209.70, sl 63123.75 -> 1R = 85.95
-    # tp1 63381.60 -> reward 171.90 -> exactly 2R ; tp2 -> 3R ; tp3 -> 4R
+def test_missing_targets_are_simply_omitted_not_shown_as_blank(db):
+    call = _make_call(db, tp1=63381.60, tp2=None, tp3=None)
+    text = telegram_bot.render_entry_message(call)
+    assert "TP1" in text
+    assert "TP2" not in text
+    assert "TP3" not in text
+
+
+def test_headline_rr_uses_the_furthest_configured_target(db):
+    # 1R = 85.95 (63209.70 - 63123.75). TP3 reward = 343.80 -> exactly 4R.
     call = _make_call(db, entry_min=63209.70, entry_max=None, stop_loss=63123.75,
                        tp1=63381.60, tp2=63467.55, tp3=63553.50)
     text = telegram_bot.render_entry_message(call)
-    assert "1:2" in text
-    assert "1:3" in text
-    assert "1:4" in text
+    assert "⚡ R:R 1:4" in text
 
 
-def test_rr_is_derived_from_this_calls_own_values_not_hardcoded(db):
-    """Different entry/SL/TP geometry must produce a different ratio —
-    proves the R:R shown isn't a fixed/hardcoded string."""
-    call = _make_call(db, instrument="EURUSD", entry_min=1.1000, entry_max=None,
-                       stop_loss=1.0950, tp1=1.1100, tp2=None, tp3=None)
-    text = telegram_bot.render_entry_message(call)
-    assert "1:2" in text  # risk .0050, reward .0100 -> exactly 2R
-    assert "63,381.60" not in text  # not leaking the other test's fixture values
-    assert "BTCUSD" not in text
-    assert "EURUSD" in text
+# ── 7. Render winning result ──────────────────────────────────────────────
+def test_winning_result_shows_profit_header(db):
+    call = _make_call(db, status=CallStatus.CLOSED, result_r=2.0)
+    text = telegram_bot.render_results_message(call)
+    assert "✅ PROFIT" in text
+    assert "🛑" not in text and "💥" not in text
+    assert telegram_bot._format_result_r(2.0) in text
 
 
-# ── 8. Premium message does NOT contain the old bot URL ─────────────────
-def test_premium_message_has_no_bot_url_footer(db):
+# ── 8. Render stopped result — and the STOPPED vs. SL HIT distinction ────
+def test_stopped_result_at_exactly_minus_1r_is_labeled_sl_hit(db):
+    """A clean stop-out at the original stop-loss level (~-1R) — per spec,
+    this is SL HIT, not generic STOPPED, and per the corrected mockup both
+    lines appear together: STOPPED as the outer status, SL HIT as the
+    confirmed detail."""
+    call = _make_call(db, status=CallStatus.STOPPED, result_r=-1.0)
+    text = telegram_bot.render_results_message(call)
+    assert "🛑 STOPPED" in text
+    assert "💥 SL HIT" in text
+
+
+def test_stopped_result_not_at_minus_1r_is_generic_stopped_only(db):
+    """A STOPPED trade that closed at a different loss (manual/system
+    stop, not a clean SL execution) must show STOPPED WITHOUT the SL HIT
+    detail — the spec is explicit that 💥 must never be used for a
+    generic stop."""
+    call = _make_call(db, status=CallStatus.STOPPED, result_r=-0.35)
+    text = telegram_bot.render_results_message(call)
+    assert "🛑 STOPPED" in text
+    assert "💥" not in text
+    assert "SL HIT" not in text
+
+
+def test_breakeven_result_uses_its_own_marker(db):
+    call = _make_call(db, status=CallStatus.CLOSED, result_r=0.0)
+    text = telegram_bot.render_results_message(call)
+    assert "➖ BREAKEVEN" in text
+
+
+# ── 9. Render Free teaser ──────────────────────────────────────────────────
+def test_free_teaser_renders_and_is_conversion_oriented(db):
     call = _make_call(db)
-    text = telegram_bot.render_entry_message(call)
-    assert "https://t.me/SterlingroomBot" not in text
-    assert "t.me/" not in text
+    text = telegram_bot.render_free_teaser_message(call)
+    assert "👑 STERLING ROOM" in text
+    assert "Premium" in text
+    assert call.instrument in text
+    assert call.direction.value in text
+    assert call.trade_id in text
 
 
+# ── 10. No execution numbers leak into Free ───────────────────────────────
+def test_free_message_does_not_contain_entry_sl_tp1_tp2_tp3_prices(db):
+    call = _make_call(
+        db, entry_min=63209.70, entry_max=None, stop_loss=63123.75,
+        tp1=63381.60, tp2=63467.55, tp3=63553.50,
+    )
+    text = telegram_bot.render_free_teaser_message(call)
+    for raw in (call.entry_min, call.stop_loss, call.tp1, call.tp2, call.tp3):
+        assert str(raw) not in text
+        assert telegram_bot._format_price(raw) not in text
+
+
+def test_free_teaser_does_not_echo_analysis_or_setup_type_free_text(db):
+    call = _make_call(
+        db, stop_loss=1900, analysis="Enter near 1950.5 with SL at 1900.25 for a clean R:R",
+        setup_type="breakout above 1955.0", invalidation="close below 1890.0",
+    )
+    text = telegram_bot.render_free_teaser_message(call)
+    for leaked in ("1950.5", "1900.25", "1955.0", "1890.0"):
+        assert leaked not in text
+
+
+# ── 11. No trading-call t.me URL ──────────────────────────────────────────
 def test_no_trading_call_message_type_has_a_bot_url_footer(db):
-    """Sweeps every renderer that produces a trading-call/update/result
-    message (not /start or onboarding, which are explicitly out of scope
-    and keep their own required links elsewhere)."""
     call = _make_call(db, status=CallStatus.CLOSED, result_r=2.0)
     texts = [
         telegram_bot.render_entry_message(call),
@@ -124,71 +190,12 @@ def test_no_trading_call_message_type_has_a_bot_url_footer(db):
         assert "t.me/" not in text
 
 
-# ── 9-13. Free message does NOT contain any execution price ─────────────
-def test_free_message_does_not_contain_entry_sl_tp1_tp2_tp3_prices(db):
-    call = _make_call(
-        db, entry_min=63209.70, entry_max=None, stop_loss=63123.75,
-        tp1=63381.60, tp2=63467.55, tp3=63553.50,
-    )
-    text = telegram_bot.render_free_teaser_message(call)
-    for raw in (call.entry_min, call.stop_loss, call.tp1, call.tp2, call.tp3):
-        assert str(raw) not in text
-        assert telegram_bot._format_price(raw) not in text
-
-
-def test_free_message_stays_attractive_and_conversion_oriented(db):
-    call = _make_call(db)
-    text = telegram_bot.render_free_teaser_message(call)
-    assert "Premium" in text
-    assert call.instrument in text
-    assert call.direction.value in text
-    assert call.trade_id in text
-
-
-# ── 14. Result message uses the new visual language ─────────────────────
-# Outcome words (WIN/LOSS/BREAKEVEN) are fixed vocabulary, like the section
-# labels — rendered bold, same as the mockup's "STATUS  WIN" line — unlike
-# the instrument ticker/direction, which are left as plain, greppable text
-# (see render_entry_message/render_results_message: call.instrument and
-# call.direction.value are deliberately never passed through _bold()).
-def test_result_message_uses_the_new_boxed_format(db):
-    call = _make_call(db, status=CallStatus.CLOSED, result_r=2.0)
-    text = telegram_bot.render_results_message(call)
-    assert telegram_bot._BOX_TL in text and telegram_bot._BOX_BR in text
-    assert telegram_bot._DIVIDER in text
-    assert telegram_bot._bold("WIN") in text
-    assert "BTCUSD" in text  # instrument stays plain/greppable
-    assert "BUY" in text     # direction stays plain/greppable
-
-
-def test_losing_and_breakeven_results_use_the_same_visual_hierarchy(db):
-    losing = _make_call(db, status=CallStatus.STOPPED, result_r=-1.0)
-    breakeven = _make_call(db, status=CallStatus.CLOSED, result_r=0.0)
-    losing_text = telegram_bot.render_results_message(losing)
-    breakeven_text = telegram_bot.render_results_message(breakeven)
-    assert telegram_bot._bold("LOSS") in losing_text and telegram_bot._BOX_TL in losing_text
-    assert telegram_bot._bold("BREAKEVEN") in breakeven_text and telegram_bot._BOX_TL in breakeven_text
-
-
-# ── 15. Result uses the existing authoritative calls.result_r ───────────
-def test_result_message_uses_authoritative_result_r_not_a_recalculation(db):
-    call = _make_call(db, status=CallStatus.CLOSED, result_r=2.0)
-    text = telegram_bot.render_results_message(call)
-    assert telegram_bot._format_result_r(call.result_r) in text
-    # Changing the stored value changes the rendered value 1:1 — proof
-    # there's no independent computation happening in the renderer.
-    call.result_r = -1.5
-    text2 = telegram_bot.render_results_message(call)
-    assert telegram_bot._format_result_r(-1.5) in text2
-    assert "-1.5R" in text2
-
-
-# ── 16. Existing duplicate protection remains intact ────────────────────
-def test_dedup_protection_still_works_after_redesign(db, monkeypatch):
+# ── 12. Retry/dedup unchanged ─────────────────────────────────────────────
+def test_dedup_protection_still_works_after_redesign(db):
     from unittest.mock import patch
 
     call = services.create_call(
-        db, dict(source_call_id="redesign-dedup-1", instrument="BTCUSD",
+        db, dict(source_call_id="redesign2-dedup-1", instrument="BTCUSD",
                  direction="BUY", stop_loss=63123.75), actor="test",
     )
     db.commit()
@@ -198,15 +205,14 @@ def test_dedup_protection_still_works_after_redesign(db, monkeypatch):
         db.commit()
         telegram_bot.distribute_call(db, call, MessageType.ENTRY, chat_ids=["-1001111"])
         db.commit()
-    assert mock_send.call_count == 1  # second call was a no-op, same as before the redesign
+    assert mock_send.call_count == 1
 
 
-# ── 17. Existing retry behavior remains intact ───────────────────────────
 def test_retry_behavior_still_works_after_redesign(db):
     from unittest.mock import patch
 
     call = services.create_call(
-        db, dict(source_call_id="redesign-retry-1", instrument="BTCUSD",
+        db, dict(source_call_id="redesign2-retry-1", instrument="BTCUSD",
                  direction="BUY", stop_loss=63123.75), actor="test",
     )
     db.commit()
@@ -220,27 +226,20 @@ def test_retry_behavior_still_works_after_redesign(db):
     assert mock_send.call_count == telegram_bot._MAX_SEND_ATTEMPTS
 
 
-# ── 18. Existing StopLossPro adapter compatibility remains intact ───────
+# ── 13. StopLossPro adapter unchanged ─────────────────────────────────────
 def test_stoplosspro_adapter_payload_shape_still_creates_a_call_and_renders(db):
-    """The exact minimal payload shape the StopLossPro adapter posts
-    (source_call_id/instrument/direction/stop_loss + optional tp/entry/
-    risk fields) must still validate, create a Call, and render a Premium
-    message without error — proves the redesign didn't change the
-    CallIn contract or break on any real adapter payload shape."""
     call = services.create_call(
         db,
         dict(
-            source_call_id="stoplosspro-adapter-e2e-1", source="stoplosspro",
+            source_call_id="stoplosspro-adapter-redesign2-1", source="stoplosspro",
             instrument="XAUUSD", direction="SELL", stop_loss=1950.0,
-            entry_min=1955.0, entry_max=1956.0, tp1=1900.0, tp2=1870.0, tp3=1840.0,
+            entry_min=1945.0, entry_max=None, tp1=1900.0, tp2=1870.0, tp3=1840.0,
             risk_percent=0.5, route_premium=True, route_free=True,
         ),
         actor="stoplosspro-adapter",
     )
     db.commit()
     assert call.trade_id.startswith("SR-")
-    # Renders cleanly (no exception) with a SELL/entry-range/full-TP shape,
-    # which is different geometry from this file's default BUY fixture.
     text = telegram_bot.render_entry_message(call)
     assert "XAUUSD" in text and "SELL" in text
     assert telegram_bot._format_price(1950.0) in text
