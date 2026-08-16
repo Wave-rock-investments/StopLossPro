@@ -1,0 +1,14 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+alembic>=1.13
+pydantic>=2.7
+pydantic-settings>=2.3
+psycopg[binary]>=3.1   # PostgreSQL driver for production; sqlite is stdlib
+argon2-cffi>=23.1       # admin password hashing (app/security.py)
+pyotp>=2.9              # admin TOTP 2FA (app/security.py)
+itsdangerous>=2.2       # signed admin session cookies (app/security.py)
+
+# dev/test only
+pytest>=8.0
+httpx>=0.27   # required by fastapi.testclient.TestClient

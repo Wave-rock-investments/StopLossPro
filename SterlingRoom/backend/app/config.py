@@ -1,0 +1,149 @@
+"""Application configuration.
+
+Every value comes from the environment, following the exact same discipline
+as Working/backend/app/config.py in this repo: nothing sensitive is ever
+hardcoded here. That rule exists project-wide because of a real incident
+(three GitHub PATs previously found hardcoded — see this repo's
+PROJECT_STATUS.md §3). Sterling_Room is a deliberately SEPARATE service from
+Working/backend (StopLossPro Pro's licensing API) — separate database,
+separate deploy target, separate secrets — per an explicit hosting decision
+made 2026-08-16 (Sterling_Room audit, "keep separate").
+
+Local development reads a `.env` file. Production supplies real environment
+variables through the hosting platform's secret manager. `.env` must stay
+gitignored; `.env.example` documents variable NAMES only, never values.
+"""
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_prefix="STERLING_",
+        extra="ignore",
+    )
+
+    # ── Environment ────────────────────────────────────────────────────────
+    ENV: Literal["development", "staging", "production"] = "development"
+    DEBUG: bool = False
+
+    # ── Database ───────────────────────────────────────────────────────────
+    # Production: postgresql+psycopg://user:pass@host:5432/sterling_room
+    # Local/tests: sqlite:///./sterling_room_dev.db
+    DATABASE_URL: str = "sqlite:///./sterling_room_dev.db"
+
+    # ── API auth ───────────────────────────────────────────────────────────
+    # Shared-secret bearer token(s) the StopLossPro adapter (and any other
+    # trusted caller) presents on POST /calls. Comma-separated so a key can be
+    # rotated by adding the new one before removing the old one. Empty means
+    # the endpoint is closed (fails safe, not open) — see api.py.
+    ADAPTER_API_KEYS: str = ""
+
+    # ── Telegram ───────────────────────────────────────────────────────────
+    # Per master-prompt §17.3: the bot and channels already exist. Values are
+    # supplied by the operator at deploy time — never hardcoded, never
+    # fabricated here.
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_FREE_CHAT_ID: str = ""
+    TELEGRAM_PREMIUM_CHAT_ID: str = ""
+    TELEGRAM_RESULTS_CHAT_ID: str = ""
+    TELEGRAM_CHANNEL_LINK: str = ""
+
+    # ── Interactive bot (Phase 4) ────────────────────────────────────────────
+    TELEGRAM_FREE_CHANNEL_LINK: str = ""      # t.me/... shown by the FREE ACCESS button
+    TELEGRAM_SUPPORT_CONTACT: str = ""        # @username or contact info shown by SUPPORT
+    # Secret path segment for the webhook URL (…/telegram/webhook/<this>) —
+    # Telegram's own recommended way to make the webhook URL unguessable,
+    # since Telegram webhooks have no other built-in caller auth. Required in
+    # production (see assert_production_ready) — an empty value means the
+    # webhook route 404s, matching the adapter's fail-closed default.
+    TELEGRAM_WEBHOOK_SECRET: str = ""
+
+    # ── Admin bootstrap (mirrors Working/backend's pattern) ─────────────────
+    ADMIN_BOOTSTRAP_TOKEN: str = ""
+    # Signs admin session cookies (app/security.py). Generate with e.g.
+    # `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+    # Falls back to ADAPTER_API_KEYS in dev only if unset — see
+    # assert_production_ready(), which refuses to boot in production without
+    # a real value here.
+    ADMIN_SESSION_SECRET: str = ""
+
+    # ── Payments (Phase 4-5) ─────────────────────────────────────────────────
+    # Which PaymentProvider app/payments.py.get_provider() returns. "manual"
+    # (cash/crypto, admin-verified) is the only implementation that exists —
+    # see app/payments.py's module docstring for why a real processor isn't
+    # wired in yet.
+    PAYMENT_PROVIDER: str = "manual"
+
+    # ── API ────────────────────────────────────────────────────────────────
+    API_PREFIX: str = "/api/v1"
+    CORS_ORIGINS: str = ""
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENV == "production"
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.DATABASE_URL.startswith("sqlite")
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def adapter_api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.ADAPTER_API_KEYS.split(",") if k.strip()]
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(self.TELEGRAM_BOT_TOKEN)
+
+    def assert_production_ready(self) -> list[str]:
+        """Return a list of blocking problems. Empty list == safe to serve prod.
+
+        Mirrors Working/backend/app/config.py's boot-guardrail pattern:
+        fail loudly at startup, not quietly at 3am under load.
+        """
+        problems: list[str] = []
+        if not self.is_production:
+            return problems
+        if self.is_sqlite:
+            problems.append(
+                "DATABASE_URL is SQLite in production. The idempotent call-"
+                "creation guarantee (a unique constraint on source_call_id) "
+                "works on SQLite too, but production-scale concurrent writes "
+                "need PostgreSQL. Use PostgreSQL."
+            )
+        if self.DEBUG:
+            problems.append("DEBUG is enabled in production.")
+        if not self.ADAPTER_API_KEYS:
+            problems.append(
+                "ADAPTER_API_KEYS is empty. POST /calls would have no valid "
+                "caller and fails closed by design, but that means nothing "
+                "can ever reach it — set at least one key."
+            )
+        if not self.ADMIN_SESSION_SECRET:
+            problems.append(
+                "ADMIN_SESSION_SECRET is empty. Admin sessions would fall back "
+                "to signing with ADAPTER_API_KEYS, re-coupling two secrets that "
+                "should be independent (same reasoning Working/backend applies "
+                "to its signing/TOTP key split) — set an independent value."
+            )
+        if self.telegram_configured and not self.TELEGRAM_WEBHOOK_SECRET:
+            problems.append(
+                "TELEGRAM_BOT_TOKEN is set but TELEGRAM_WEBHOOK_SECRET is empty. "
+                "The webhook route fails closed (404) without it — set a secret "
+                "path segment before registering the webhook URL with Telegram."
+            )
+        return problems
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
