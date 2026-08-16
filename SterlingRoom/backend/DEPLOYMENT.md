@@ -257,6 +257,35 @@ service yet)
    end to end and confirm it lands correctly before declaring the
    migration complete.
 
+## 9a. Domain & HTTPS — no production domain has been supplied
+
+No domain name has been provided for Sterling_Room as of this audit, and
+none is invented here. What's required once one exists:
+
+- **DNS**: an `A`/`AAAA` record (or a `CNAME` if the host issues one, e.g.
+  `sterling-api.yourdomain.com CNAME your-app.onrender.com`) pointing the
+  chosen subdomain at the hosting platform. Most PaaS hosts (Render, Fly,
+  Railway, etc.) issue and auto-renew a TLS certificate once the DNS record
+  resolves to them — check the specific host's docs for the exact record
+  they expect before creating it.
+- **HTTPS is not optional**: the Telegram webhook (§5) and the admin
+  session cookie's `secure` flag (`app/admin.py::login_submit`, tied to
+  `settings.is_production`) both require it — the admin cookie is not
+  marked secure in non-production environments specifically so local
+  HTTP development still works, which means a production deploy served
+  over plain HTTP would silently transmit the session cookie in the
+  clear. Do not put a production Sterling_Room instance behind anything
+  but HTTPS.
+- **Recommended split**: `api.<domain>` for the adapter/monitoring API and
+  `admin.<domain>` (or a path prefix on the same host) for the dashboard —
+  not required by the code (both are served by the same FastAPI app,
+  `app/main.py`), but keeps the admin surface off a subdomain a public
+  API consumer would think to probe.
+- Until a domain is chosen, staging/local traffic uses the hosting
+  platform's default HTTPS subdomain (e.g. `*.onrender.com`), which is
+  sufficient for the Telegram webhook requirement (Telegram only requires
+  valid HTTPS, not a custom domain).
+
 ## 10. Rollback
 
 - **App**: redeploy the previous container/release; migrations run so far
