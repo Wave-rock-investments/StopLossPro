@@ -745,7 +745,7 @@ def test_create_call_premium_gets_full_immediately_free_gets_nothing_yet(http_en
         ).all()
         assert len(premium_msgs) == 1
         assert premium_msgs[0].delivery_status == DeliveryStatus.SENT
-        assert "1900" in premium_msgs[0].message_text  # full stop loss present for Premium
+        assert telegram_bot._format_price(1900) in premium_msgs[0].message_text  # full stop loss present for Premium
 
         free_msgs = db.query(CallMessage).filter_by(call_id=call.id, telegram_chat_id="-2001").all()
         assert len(free_msgs) == 0  # nothing sent to Free yet, at any message type

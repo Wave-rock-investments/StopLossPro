@@ -31,6 +31,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
 
@@ -55,45 +56,213 @@ _BACKGROUND_BACKOFF_S = (30, 60, 120, 300, 600)  # indexed by retry_count, cappe
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Visual styling helpers (2026-08-16 premium-desk redesign — presentation
+# layer only, see docstrings on the individual render_* functions below for
+# what each one deliberately does NOT change).
+#
+# Every glyph used here (box-drawing borders, Mathematical Bold letters/
+# digits, circled numbers, diamonds/bars) is a plain Unicode character, not
+# Telegram markup — _send_telegram_message below sends with no `parse_mode`
+# set (unchanged by this redesign), so Telegram never attempts to parse
+# these messages as Markdown/HTML in the first place. That means there is
+# nothing here for Telegram's parser to reject, and no escaping is needed.
+#
+# _bold() is a programmatic Unicode Mathematical Bold transform (codepoint
+# arithmetic against the standard Mathematical Alphanumeric Symbols block),
+# used consistently for every bold header/label below, rather than hand-
+# transcribing the several visually-different "fancy text" alphabets (bold
+# upright vs. bold italic vs. small-caps) seen in ad-hoc mockups — those are
+# easy to get a code point wrong on when typed by hand, and are not
+# reliably distinguishable from each other in most Telegram clients anyway.
+# ══════════════════════════════════════════════════════════════════════════
+_BOLD_UPPER_BASE = 0x1D400  # MATHEMATICAL BOLD CAPITAL A
+_BOLD_LOWER_BASE = 0x1D41A  # MATHEMATICAL BOLD SMALL A
+_BOLD_DIGIT_BASE = 0x1D7CE  # MATHEMATICAL BOLD DIGIT ZERO
+
+
+def _bold(text: str) -> str:
+    """Unicode Mathematical Bold transform for headers/labels only — never
+    applied to numeric price/result values (see _format_price), so a test
+    (or a support agent) can always find the exact rendered number as
+    plain digits regardless of label styling."""
+    out = []
+    for ch in text:
+        if "A" <= ch <= "Z":
+            out.append(chr(_BOLD_UPPER_BASE + (ord(ch) - ord("A"))))
+        elif "a" <= ch <= "z":
+            out.append(chr(_BOLD_LOWER_BASE + (ord(ch) - ord("a"))))
+        elif "0" <= ch <= "9":
+            out.append(chr(_BOLD_DIGIT_BASE + (ord(ch) - ord("0"))))
+        else:
+            out.append(ch)  # spaces, punctuation, box-drawing, emoji pass through unchanged
+    return "".join(out)
+
+
+# Box-drawing / marker glyphs, named by codepoint rather than pasted so the
+# exact character is auditable at a glance instead of relying on a
+# copy-pasted glyph rendering correctly in every editor/terminal.
+_BOX_TL, _BOX_TR = chr(0x2554), chr(0x2557)   # ╔ ╗  (double line)
+_BOX_BL, _BOX_BR = chr(0x255A), chr(0x255D)   # ╚ ╝
+_BOX_H, _BOX_V = chr(0x2550), chr(0x2551)     # ═ ║
+_DIVIDER = chr(0x2501) * 20                    # ━━━━━━━━━━━━━━━━━━━━ (heavy horizontal)
+_DIAMOND = chr(0x25C8)                         # ◈
+_VBAR = chr(0x2502)                            # │
+_VBAR_HEAVY = chr(0x2503)                      # ┃
+_TP_MARKERS = [chr(0x2460 + i) for i in range(3)]  # ① ② ③
+
+
+def _box_header(label: str) -> str:
+    """╔══...══╗ / ║  label  ║ / ╚══...══╝ sized to the (already-bold)
+    label passed in, with 3 spaces of padding each side."""
+    pad = 3
+    width = len(label) + pad * 2
+    return "\n".join([
+        _BOX_TL + _BOX_H * width + _BOX_TR,
+        _BOX_V + " " * pad + label + " " * pad + _BOX_V,
+        _BOX_BL + _BOX_H * width + _BOX_BR,
+    ])
+
+
+def _section_label(text: str) -> str:
+    return _bold(text).center(len(_DIVIDER))
+
+
+def _format_price(value) -> str:
+    """Comma-grouped price display that PRESERVES the value's real
+    precision instead of forcing a fixed decimal count — e.g. 63209.70 ->
+    '63,209.70' (a whole/near-whole price gets padded to 2 decimals for
+    readability), but a 4-decimal forex quote like 1.4321 stays exactly
+    '1.4321', never truncated to '1.43'. Truncating a real stop-loss/entry/
+    TP price would silently change the actual level shown to Premium
+    subscribers, which is a correctness bug this redesign must not
+    introduce (it is presentation-only). Uses Decimal throughout (never
+    float) to avoid binary-float rounding artifacts. Deliberately plain
+    (non-bold) digits — see _bold()'s docstring."""
+    if value is None:
+        return "—"
+    try:
+        d = Decimal(str(value)).normalize()
+    except (InvalidOperation, TypeError):
+        return str(value)
+    # normalize() can flip a whole number into exponent form (e.g.
+    # Decimal('1900') -> Decimal('1.9E+3')) — undo that so formatting
+    # below never emits scientific notation.
+    if d.as_tuple().exponent > 0:
+        d = d.quantize(Decimal(1))
+    text = f"{d:,f}"
+    if "." in text:
+        integer_part, frac = text.split(".")
+        text = f"{integer_part}.{frac.ljust(2, '0')}"
+    else:
+        text = f"{text}.00"
+    return text
+
+
+def _compute_rr(call: Call, tp_value) -> str | None:
+    """Risk:reward ratio for one target, derived at render time from the
+    call's own authoritative entry/stop_loss/tp fields — there is no
+    separate stored R:R value anywhere else in this codebase to preserve
+    or contradict (checked: no such field/function exists outside this
+    renderer), so this IS the one and only R:R calculation, not a second
+    one competing with an existing "authoritative" source. Returns None
+    (never a fabricated ratio) whenever entry price, the target, or a
+    sane positive risk aren't all available — e.g. a MARKET-entry call
+    with no entry_min/entry_max simply shows no ratio for that target."""
+    if tp_value is None:
+        return None
+    entry = None
+    if call.entry_min is not None and call.entry_max is not None:
+        entry = (float(call.entry_min) + float(call.entry_max)) / 2
+    elif call.entry_min is not None:
+        entry = float(call.entry_min)
+    elif call.entry_max is not None:
+        entry = float(call.entry_max)
+    if entry is None:
+        return None
+
+    sl, tp = float(call.stop_loss), float(tp_value)
+    if call.direction == CallDirection.SELL:
+        risk, reward = sl - entry, entry - tp
+    else:
+        risk, reward = entry - sl, tp - entry
+    if risk <= 0 or reward <= 0:
+        return None
+
+    ratio = reward / risk
+    if abs(ratio - round(ratio)) < 0.05:
+        return f"1:{round(ratio)}"
+    return f"1:{ratio:.1f}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Templates (master-prompt §21-25) — configurable via the settings dict
 # passed in, never hardcoded business copy scattered through the codebase.
+#
+# 2026-08-16 premium-desk redesign: presentation only. Every dynamic value
+# below (direction, instrument, entry/SL/TP prices, R:R, result_r, status,
+# trade_id) is read straight off the same `Call`/`CallMessage` fields the
+# previous templates used — no call/entry/SL/TP/R:R/result logic changed,
+# only how it's laid out as text. See docstrings below for the two
+# deliberate scope boundaries: the Free teaser still never touches
+# execution-number fields (unchanged principle from before this redesign),
+# and no template appends a bot/channel URL (there never was one in these
+# renderers — see TELEGRAM_PRODUCTION_SETUP.md's /start flow for the
+# separate, untouched onboarding link).
 # ══════════════════════════════════════════════════════════════════════════
 def render_entry_message(call: Call) -> str:
+    """Premium call — full execution detail, immediately. See module
+    docstring above for the redesign's scope boundaries."""
     arrow = "🔴" if call.direction == CallDirection.SELL else "🟢"
-    entry = (f"{call.entry_min} – {call.entry_max}" if call.entry_min and call.entry_max
-              else (str(call.entry_min or call.entry_max) if (call.entry_min or call.entry_max) else "MARKET"))
+    if call.entry_min is not None and call.entry_max is not None:
+        entry_display = f"{_format_price(call.entry_min)} – {_format_price(call.entry_max)}"
+    elif call.entry_min is not None or call.entry_max is not None:
+        entry_display = _format_price(call.entry_min if call.entry_min is not None else call.entry_max)
+    else:
+        entry_display = "MARKET"
+
     lines = [
-        "━━━━━━━━━━━━━━━━",
-        "STERLING_ROOM",
-        "TRADE CALL",
-        "━━━━━━━━━━━━━━━━",
+        _box_header(_bold("STERLING ROOM") + "  •  " + _bold("PREMIUM")),
         "",
-        f"{arrow} {call.instrument} — {call.direction.value}",
-        "",
-        "ENTRY",
-        entry,
-        "",
-        "STOP LOSS",
-        str(call.stop_loss),
+        f"{arrow}  {call.direction.value} {call.instrument}",
+        _DIVIDER,
+        _section_label("ENTRY  •  SL"),
+        _DIVIDER,
+        f"{_DIAMOND} {_bold('ENTRY')}   {_VBAR} {entry_display}",
+        f"{_DIAMOND} {_bold('SL')}       {_VBAR} {_format_price(call.stop_loss)}",
     ]
-    if call.tp1:
-        lines += ["", "TARGET 1", str(call.tp1)]
-    if call.tp2:
-        lines += ["", "TARGET 2", str(call.tp2)]
+
+    tp_lines = []
+    for marker, tp_value in zip(_TP_MARKERS, (call.tp1, call.tp2, call.tp3)):
+        if tp_value is None:
+            continue
+        rr = _compute_rr(call, tp_value)
+        suffix = f"   {_VBAR_HEAVY} {rr}" if rr else ""
+        tp_lines.append(f"{marker}  {_format_price(tp_value)}{suffix}")
+    if tp_lines:
+        lines += [_DIVIDER, _section_label("TAKE PROFIT"), _DIVIDER] + tp_lines
+
+    lines += [_DIVIDER, f"⚡ {_bold('RISK MANAGEMENT FIRST')}"]
+
+    extras = []
     if call.risk_percent:
-        lines += ["", "RISK", f"{call.risk_percent}%"]
+        extras.append(f"{_DIAMOND} {_bold('RISK')}     {_VBAR} {call.risk_percent}%")
     if call.setup_type:
-        lines += ["", "SETUP", call.setup_type]
+        extras.append(f"{_DIAMOND} {_bold('SETUP')}    {_VBAR} {call.setup_type}")
     if call.invalidation:
-        lines += ["", "INVALIDATION", call.invalidation]
-    lines += ["", "TRADE ID", call.trade_id, "", "━━━━━━━━━━━━━━━━"]
+        extras.append(f"{_DIAMOND} {_bold('INVALIDATION')} {_VBAR} {call.invalidation}")
+    if extras:
+        lines += [_DIVIDER] + extras
+
+    lines += [_DIVIDER, f"{_bold('TRADE ID')}   {call.trade_id}", _DIVIDER]
     return "\n".join(lines)
 
 
 def render_free_teaser_message(call: Call) -> str:
     """Sanitized, delayed Free-channel teaser (2026-08-16 production
-    architecture). Deliberately built from a FIXED, hardcoded template plus
-    only two call fields — instrument and direction — never from
+    architecture; 2026-08-16 restyled for the premium-desk redesign —
+    presentation only, the underlying safety principle is UNCHANGED).
+    Deliberately built from a FIXED, hardcoded template plus only two call
+    fields — instrument and direction — never from
     call.analysis/call.setup_type/call.invalidation or any of the
     price/risk fields (entry_min/max, stop_loss, tp1-3, risk_percent).
 
@@ -104,48 +273,57 @@ def render_free_teaser_message(call: Call) -> str:
     Given the explicit STOP CONDITION ("if Free can expose actionable
     numerical information, do not deploy"), the only version of this
     renderer that can be verified never to leak is one that structurally
-    cannot: fixed copy, no passthrough of free-form fields. If a richer,
-    still-safe "general context" is wanted later, it needs a real
-    separately-authored sanitized-copy field, not a filter over
-    analyst-supplied text.
+    cannot: fixed copy, no passthrough of free-form fields, and — as of
+    this redesign — still no price-formatting helper (_format_price) is
+    ever called anywhere in this function. If a richer, still-safe
+    "general context" is wanted later, it needs a real separately-authored
+    sanitized-copy field, not a filter over analyst-supplied text.
     """
     arrow = "🔴" if call.direction == CallDirection.SELL else "🟢"
-    return "\n".join([
-        "━━━━━━━━━━━━━━━━",
-        "STERLING_ROOM",
-        "NEW SETUP",
-        "━━━━━━━━━━━━━━━━",
+    lines = [
+        _box_header(_bold("STERLING ROOM")),
         "",
-        f"{arrow} {call.instrument} — {call.direction.value}",
+        f"{arrow}  {call.direction.value} {call.instrument}",
+        _DIVIDER,
+        _section_label("PREMIUM CALL"),
+        _DIVIDER,
+        f"⚡ {_bold('Full execution levels')}",
+        f"🔒 {_bold('Entry')} • {_bold('SL')} • {_bold('TP')}",
         "",
-        "A new trade setup is live now for Premium members — full entry,",
-        "stop loss, and take-profit levels, managed in real time.",
-        "",
-        "Verified results from every call are posted here once closed.",
-        "",
-        "Want the full call as it happens? Join SterlingRoom_Premium.",
-        "",
-        "TRADE ID",
-        call.trade_id,
-        "",
-        "━━━━━━━━━━━━━━━━",
-    ])
+        "Available inside SterlingRoom Premium.",
+        _DIVIDER,
+        f"{_bold('TRADE ID')}   {call.trade_id}",
+        _DIVIDER,
+    ]
+    return "\n".join(lines)
 
 
 def render_update_message(call: Call, update_text: str, update_number: int) -> str:
-    return "\n".join([
-        "STERLING_ROOM", "TRADE UPDATE", "",
-        "TRADE ID", call.trade_id, "",
-        f"UPDATE #{update_number}", "", update_text, "",
-        "STATUS", call.status.value,
-    ])
+    lines = [
+        _box_header(_bold("STERLING ROOM") + "  •  " + _bold("UPDATE")),
+        "",
+        f"{_bold('TRADE ID')}   {call.trade_id}",
+        f"{_bold('UPDATE')} #{update_number}",
+        _DIVIDER,
+        update_text,
+        _DIVIDER,
+        f"{_DIAMOND} {_bold('STATUS')}   {_VBAR} {call.status.value}",
+        _DIVIDER,
+    ]
+    return "\n".join(lines)
 
 
 def render_tp1_message(call: Call, management_instruction: str = "") -> str:
-    lines = ["STERLING_ROOM", "TP1 HIT", "", "TRADE ID", call.trade_id, "", "TP1 reached."]
+    lines = [
+        _box_header(_bold("STERLING ROOM") + "  •  " + _bold("UPDATE")),
+        "",
+        f"🎯  {call.instrument} {call.direction.value}  —  {_bold('TP1 HIT')}",
+        _DIVIDER,
+        f"{_bold('TRADE ID')}   {call.trade_id}",
+    ]
     if management_instruction:
-        lines += ["", "MANAGEMENT", management_instruction]
-    lines += ["", "REMAINING POSITION", "TP2 active."]
+        lines += [_DIVIDER, f"{_DIAMOND} {_bold('MANAGEMENT')} {_VBAR} {management_instruction}"]
+    lines += [_DIVIDER, f"{_DIAMOND} {_bold('REMAINING')}   {_VBAR} {_bold('TP2 ACTIVE')}", _DIVIDER]
     return "\n".join(lines)
 
 
@@ -167,18 +345,29 @@ def _format_result_r(result_r) -> str:
 
 def render_exit_message(call: Call) -> str:
     result = _format_result_r(call.result_r)
-    return "\n".join([
-        "STERLING_ROOM", "TRADE CLOSED", "",
-        "TRADE ID", call.trade_id, "",
-        "RESULT", result, "",
-        "STATUS", "COMPLETED",
-    ])
+    lines = [
+        _box_header(_bold("STERLING ROOM") + "  •  " + _bold("CLOSED")),
+        "",
+        f"{_bold('TRADE ID')}   {call.trade_id}",
+        _DIVIDER,
+        f"{_DIAMOND} {_bold('RESULT')}   {_VBAR} {result}",
+        f"{_DIAMOND} {_bold('STATUS')}   {_VBAR} {_bold('COMPLETED')}",
+        _DIVIDER,
+    ]
+    return "\n".join(lines)
 
 
 def render_invalidated_message(call: Call, reason: str = "") -> str:
-    lines = ["STERLING_ROOM", "SETUP INVALIDATED", "", "TRADE ID", call.trade_id, "", "No trade."]
+    lines = [
+        _box_header(_bold("STERLING ROOM") + "  •  " + _bold("INVALIDATED")),
+        "",
+        f"⚠ {call.instrument} {call.direction.value}  —  {_bold('NO TRADE')}",
+        _DIVIDER,
+        f"{_bold('TRADE ID')}   {call.trade_id}",
+    ]
     if reason:
-        lines += ["", "REASON", reason]
+        lines += [_DIVIDER, f"{_DIAMOND} {_bold('REASON')}   {_VBAR} {reason}"]
+    lines += [_DIVIDER]
     return "\n".join(lines)
 
 
@@ -189,19 +378,32 @@ def render_results_message(call: Call) -> str:
     app/performance.py sums over for the ledger) — nothing is recomputed
     independently for Telegram, so this can never drift from what the
     performance ledger reports for the same trade (master-prompt Phase 10:
-    "do not manually calculate results separately for Telegram").
+    "do not manually calculate results separately for Telegram"). 2026-08-16
+    premium-desk redesign: presentation only — `call.result_r` is read and
+    formatted (_format_result_r, unchanged) exactly as before, never
+    recomputed.
     """
     result = _format_result_r(call.result_r)
-    outcome = "WIN" if (call.result_r or 0) > 0 else ("LOSS" if (call.result_r or 0) < 0 else "BREAKEVEN")
-    return "\n".join([
-        "━━━━━━━━━━━━━━━━",
-        "STERLING_ROOM", "RESULT", "━━━━━━━━━━━━━━━━", "",
-        f"{call.instrument} — {call.direction.value}", "",
-        "TRADE ID", call.trade_id, "",
-        "OUTCOME", outcome, "",
-        "RESULT", result, "",
-        "STATUS", call.status.value,
-    ])
+    r_value = float(call.result_r) if call.result_r is not None else 0.0
+    if r_value > 0:
+        outcome, icon = "WIN", "✅"
+    elif r_value < 0:
+        outcome, icon = "LOSS", "❌"
+    else:
+        outcome, icon = "BREAKEVEN", "➖"
+
+    lines = [
+        _box_header(_bold("STERLING ROOM") + "  •  " + _bold("RESULT")),
+        "",
+        f"{icon}  {call.instrument} {call.direction.value}  —  {_bold(outcome)}",
+        _DIVIDER,
+        f"{_DIAMOND} {_bold('RESULT')}   {_VBAR} {result}",
+        f"{_DIAMOND} {_bold('STATUS')}   {_VBAR} {call.status.value}",
+        _DIVIDER,
+        f"{_bold('TRADE ID')}   {call.trade_id}",
+        _DIVIDER,
+    ]
+    return "\n".join(lines)
 
 
 _RENDERERS = {
