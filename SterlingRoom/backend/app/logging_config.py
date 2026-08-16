@@ -26,6 +26,20 @@ class JSONFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        # Every log line emitted while handling a request carries the same
+        # request_id RequestIDMiddleware (app/main.py) attached to it, so
+        # log lines from a single request can be grep'd together even
+        # across the rate limiter, the route handler, and any service code
+        # it calls. Imported lazily to avoid a hard dependency at module
+        # load time for anything that imports logging_config before the
+        # rest of the app package is available (e.g. very early tooling).
+        try:
+            from app.request_context import get_request_id
+            rid = get_request_id()
+            if rid != "-":
+                payload["request_id"] = rid
+        except Exception:
+            pass
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         # Anything passed via logging's `extra={...}` rides along untouched —

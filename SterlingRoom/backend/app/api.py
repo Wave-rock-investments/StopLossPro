@@ -25,6 +25,7 @@ from app import bot as interactive_bot
 from app import performance
 from app import services
 from app import telegram_bot
+from app.rate_limit import check_rate_limit, key_hash, telegram_webhook_limit
 
 router = APIRouter()
 settings = get_settings()
@@ -48,6 +49,25 @@ def require_adapter_key(authorization: str | None = Header(default=None)) -> str
     if not any(hmac.compare_digest(token, k) for k in valid_keys):
         raise HTTPException(status_code=401, detail="Invalid adapter API key")
     return token
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Rate limiting (Phase 9) — scoped per adapter API key, not per IP.
+# StopLossPro's own traffic is authenticated, trusted machine traffic, not
+# a public surface to defend against — see app/rate_limit.py's module
+# docstring ("trusted internal calls"). The limit here is a safety net
+# against a runaway bug on the caller's side (a retry loop gone wrong),
+# generous enough that it never interferes with real call volume. Depends
+# on require_adapter_key so rate-limit identity is the authenticated key,
+# never the caller's IP — a legitimate caller behind a NAT/proxy shares
+# nothing with any other caller's quota.
+# ══════════════════════════════════════════════════════════════════════════
+def _adapter_write_limit(request: Request, token: str = Depends(require_adapter_key)) -> None:
+    check_rate_limit("adapter_write", key_hash(token), request)
+
+
+def _adapter_read_limit(request: Request, token: str = Depends(require_adapter_key)) -> None:
+    check_rate_limit("adapter_read", key_hash(token), request)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -119,7 +139,8 @@ def _err(exc: services.ServiceError):
 # Routes
 # ══════════════════════════════════════════════════════════════════════════
 @router.post("/calls", tags=["calls"], response_model=CallOut)
-def create_call(body: CallIn, db: Session = Depends(get_db), token: str = Depends(require_adapter_key)):
+def create_call(body: CallIn, db: Session = Depends(get_db), token: str = Depends(require_adapter_key),
+                 _rl: None = Depends(_adapter_write_limit)):
     payload = body.model_dump()
     try:
         call = services.create_call(db, payload, actor=f"adapter:{payload.get('source', 'unknown')}")
@@ -143,7 +164,7 @@ def create_call(body: CallIn, db: Session = Depends(get_db), token: str = Depend
 
 @router.get("/calls", tags=["calls"], response_model=list[CallOut])
 def list_calls(status: str | None = None, limit: int = 50, db: Session = Depends(get_db),
-                token: str = Depends(require_adapter_key)):
+                token: str = Depends(require_adapter_key), _rl: None = Depends(_adapter_read_limit)):
     q = select(Call).order_by(Call.created_at.desc()).limit(min(limit, 200))
     if status:
         try:
@@ -154,7 +175,8 @@ def list_calls(status: str | None = None, limit: int = 50, db: Session = Depends
 
 
 @router.get("/calls/{trade_id}", tags=["calls"], response_model=CallOut)
-def get_call(trade_id: str, db: Session = Depends(get_db), token: str = Depends(require_adapter_key)):
+def get_call(trade_id: str, db: Session = Depends(get_db), token: str = Depends(require_adapter_key),
+             _rl: None = Depends(_adapter_read_limit)):
     call = db.execute(select(Call).where(Call.trade_id == trade_id)).scalar_one_or_none()
     if call is None:
         raise HTTPException(status_code=404, detail="Not found")
@@ -179,7 +201,7 @@ _TRANSITION_MESSAGE_MAP = {
 
 @router.post("/calls/{trade_id}/events", tags=["calls"], response_model=CallOut)
 def transition_call(trade_id: str, body: TransitionIn, db: Session = Depends(get_db),
-                     token: str = Depends(require_adapter_key)):
+                     token: str = Depends(require_adapter_key), _rl: None = Depends(_adapter_write_limit)):
     call = db.execute(select(Call).where(Call.trade_id == trade_id)).scalar_one_or_none()
     if call is None:
         raise HTTPException(status_code=404, detail="Not found")
@@ -240,23 +262,27 @@ class PerformanceOut(BaseModel):
 
 
 @router.get("/performance", tags=["performance"], response_model=PerformanceOut)
-def get_performance(db: Session = Depends(get_db), token: str = Depends(require_adapter_key)):
+def get_performance(db: Session = Depends(get_db), token: str = Depends(require_adapter_key),
+                     _rl: None = Depends(_adapter_read_limit)):
     return PerformanceOut.from_stats(performance.compute_stats(db))
 
 
 @router.get("/performance/daily", tags=["performance"], response_model=PerformanceOut)
-def get_performance_daily(db: Session = Depends(get_db), token: str = Depends(require_adapter_key)):
+def get_performance_daily(db: Session = Depends(get_db), token: str = Depends(require_adapter_key),
+                           _rl: None = Depends(_adapter_read_limit)):
     return PerformanceOut.from_stats(performance.daily_results(db))
 
 
 @router.get("/performance/weekly", tags=["performance"], response_model=PerformanceOut)
-def get_performance_weekly(db: Session = Depends(get_db), token: str = Depends(require_adapter_key)):
+def get_performance_weekly(db: Session = Depends(get_db), token: str = Depends(require_adapter_key),
+                            _rl: None = Depends(_adapter_read_limit)):
     return PerformanceOut.from_stats(performance.weekly_results(db))
 
 
 @router.get("/performance/monthly", tags=["performance"], response_model=PerformanceOut)
 def get_performance_monthly(year: int | None = None, month: int | None = None,
-                             db: Session = Depends(get_db), token: str = Depends(require_adapter_key)):
+                             db: Session = Depends(get_db), token: str = Depends(require_adapter_key),
+                             _rl: None = Depends(_adapter_read_limit)):
     return PerformanceOut.from_stats(performance.monthly_results(db, year=year, month=month))
 
 
@@ -281,7 +307,8 @@ class MonitoringOut(BaseModel):
 
 
 @router.get("/monitoring", tags=["ops"], response_model=MonitoringOut)
-def monitoring(db: Session = Depends(get_db), token: str = Depends(require_adapter_key)):
+def monitoring(db: Session = Depends(get_db), token: str = Depends(require_adapter_key),
+                _rl: None = Depends(_adapter_read_limit)):
     db_ok = True
     try:
         db.execute(select(Call.id).limit(1))
@@ -316,7 +343,8 @@ def monitoring(db: Session = Depends(get_db), token: str = Depends(require_adapt
 # doesn't exist here" — same reasoning as not leaking which trade_ids exist.
 # ══════════════════════════════════════════════════════════════════════════
 @router.post("/telegram/webhook/{secret}", tags=["telegram"], include_in_schema=False)
-async def telegram_webhook(secret: str, request: Request, db: Session = Depends(get_db)):
+async def telegram_webhook(secret: str, request: Request, db: Session = Depends(get_db),
+                            _rl: None = Depends(telegram_webhook_limit)):
     if not settings.TELEGRAM_WEBHOOK_SECRET or not hmac.compare_digest(secret, settings.TELEGRAM_WEBHOOK_SECRET):
         raise HTTPException(status_code=404)
     try:

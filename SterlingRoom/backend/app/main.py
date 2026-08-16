@@ -10,8 +10,9 @@ subscription lifecycle (app/subscriptions.py), performance ledger
 (app/performance.py), and the admin dashboard (app/admin.py).
 """
 import logging
+import uuid
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -20,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.logging_config import configure_logging
+from app.request_context import reset_request_id, set_request_id
 
 settings = get_settings()
 
@@ -45,6 +47,25 @@ if settings.cors_origin_list:
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
     )
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Attaches a correlation ID to every request — reused from
+    X-Request-ID if the caller (e.g. a load balancer) already set one, else
+    generated fresh. Every log line emitted while handling this request
+    (including from app/rate_limit.py) carries it automatically via
+    app/request_context.py + app/logging_config.py's JSONFormatter, and
+    it's echoed back in the response header so a caller can correlate their
+    own logs with Sterling_Room's."""
+    rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
+    token = set_request_id(rid)
+    try:
+        response = await call_next(request)
+    finally:
+        reset_request_id(token)
+    response.headers["X-Request-ID"] = rid
+    return response
 
 
 def _mask_chat_id(chat_id: str) -> str:
@@ -84,8 +105,11 @@ def _startup_guard() -> None:
             "telegram_premium_chat": _mask_chat_id(settings.TELEGRAM_PREMIUM_CHAT_ID),
             "telegram_results_chat": _mask_chat_id(settings.TELEGRAM_RESULTS_CHAT_ID),
             "payment_provider": settings.PAYMENT_PROVIDER,
+            "rate_limit_backend": "redis" if settings.REDIS_URL else "in-memory",
         },
     )
+    for warning in settings.production_warnings():
+        log.warning(warning)
 
 
 from app.admin import router as admin_router  # noqa: E402

@@ -84,6 +84,24 @@ class Settings(BaseSettings):
     API_PREFIX: str = "/api/v1"
     CORS_ORIGINS: str = ""
 
+    # ── Rate limiting (Phase 9 — launch hardening) ───────────────────────────
+    # See app/rate_limit.py for the full design. Empty means "use the
+    # in-memory backend" — correct for a single-process deployment (dev,
+    # staging with one worker), NOT correct once more than one worker
+    # process is running (each process would get its own counters, silently
+    # multiplying the effective limit). Set this before scaling beyond one
+    # worker in production — assert_production_ready() warns (does not
+    # block boot) if it's unset in production, since a single-worker
+    # production deployment is a legitimate, if constrained, choice.
+    REDIS_URL: str = ""
+    # Whether to trust the X-Forwarded-For header for rate-limit identity
+    # (client IP). Only enable this if Sterling_Room sits behind a proxy/load
+    # balancer that YOU control and that overwrites/strips any
+    # client-supplied X-Forwarded-For before setting its own — otherwise any
+    # client can forge this header and evade or frame another IP's rate
+    # limit. Default false: trust only the TCP-level peer address.
+    TRUST_PROXY_HEADERS: bool = False
+
     @property
     def is_production(self) -> bool:
         return self.ENV == "production"
@@ -142,6 +160,22 @@ class Settings(BaseSettings):
                 "path segment before registering the webhook URL with Telegram."
             )
         return problems
+
+    def production_warnings(self) -> list[str]:
+        """Non-blocking warnings — things worth an operator's attention in
+        production but not worth refusing to boot over (unlike
+        assert_production_ready's problems list). Logged at startup."""
+        warnings: list[str] = []
+        if self.is_production and not self.REDIS_URL:
+            warnings.append(
+                "REDIS_URL is unset in production. Rate limiting will use the "
+                "in-memory backend, which is only correct for a single worker "
+                "process — if this deployment ever runs more than one worker, "
+                "each gets independent counters and the effective rate limit "
+                "silently multiplies. Fine for a single-worker launch; set "
+                "REDIS_URL before scaling out."
+            )
+        return warnings
 
 
 @lru_cache

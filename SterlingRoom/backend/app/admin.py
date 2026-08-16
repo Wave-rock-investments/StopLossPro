@@ -42,6 +42,7 @@ from app.models import (
     DeliveryStatus, Payment, PaymentStatus, Plan, Subscriber, Subscription,
     SubscriptionStatus, SupportTicket, TelegramChat, TicketStatus,
 )
+from app.rate_limit import admin_bootstrap_limit, admin_login_limit, check_rate_limit
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -103,6 +104,23 @@ def _require_write_role(admin: AdminUser) -> None:
     as one that can move money-adjacent state."""
     if admin.role not in _WRITE_ROLES:
         raise HTTPException(status_code=403, detail="This action requires the ADMIN or SUPER_ADMIN role")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Rate limiting (Phase 9) — scoped per authenticated admin (admin.id), not
+# per IP. An office full of admins behind one NAT shouldn't share a quota,
+# and an attacker who steals a session cookie can't get a bigger budget by
+# rotating IPs. Depends on require_admin so identity is always the resolved
+# admin, never the caller's address — FastAPI caches require_admin's result
+# per request, so this doesn't re-run auth a second time on routes that
+# also declare `admin: AdminUser = Depends(require_admin)` directly.
+# ══════════════════════════════════════════════════════════════════════════
+def _admin_read_limit(request: Request, admin: AdminUser = Depends(require_admin)) -> None:
+    check_rate_limit("admin_read", str(admin.id), request)
+
+
+def _admin_write_limit(request: Request, admin: AdminUser = Depends(require_admin)) -> None:
+    check_rate_limit("admin_write", str(admin.id), request)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -190,6 +208,7 @@ def bootstrap_admin(
     email: str = Form(...), password: str = Form(...),
     x_bootstrap_token: str | None = Header(default=None, alias="X-Bootstrap-Token"),
     db: Session = Depends(get_db),
+    _rl: None = Depends(admin_bootstrap_limit),
 ):
     settings = get_settings()
     if not settings.ADMIN_BOOTSTRAP_TOKEN or not hmac.compare_digest(
@@ -238,7 +257,10 @@ def login_form():
 
 
 @router.post("/login")
-def login_submit(email: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+def login_submit(
+    email: str = Form(...), password: str = Form(...), db: Session = Depends(get_db),
+    _rl: None = Depends(admin_login_limit),
+):
     now = datetime.now(timezone.utc)
     admin = db.execute(select(AdminUser).where(AdminUser.email == email.strip().lower())).scalar_one_or_none()
 
@@ -283,7 +305,10 @@ def logout():
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("", response_class=HTMLResponse)
 @router.get("/", response_class=HTMLResponse)
-def dashboard_home(db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def dashboard_home(
+    db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     from app.models import TERMINAL_CALL_STATUSES
 
     today_stats = performance.daily_results(db)
@@ -322,7 +347,10 @@ def dashboard_home(db: Session = Depends(get_db), admin: AdminUser = Depends(req
 # source (services.create_call / services.transition_call), never this page.
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("/calls", response_class=HTMLResponse)
-def calls_list(status: str | None = None, db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def calls_list(
+    status: str | None = None, db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     q = select(Call).order_by(Call.created_at.desc()).limit(200)
     if status:
         try:
@@ -349,7 +377,10 @@ def calls_list(status: str | None = None, db: Session = Depends(get_db), admin: 
 
 
 @router.get("/calls/{trade_id}", response_class=HTMLResponse)
-def call_detail(trade_id: str, db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def call_detail(
+    trade_id: str, db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     call = db.execute(select(Call).where(Call.trade_id == trade_id)).scalar_one_or_none()
     if call is None:
         raise HTTPException(status_code=404, detail="Call not found")
@@ -410,7 +441,10 @@ def _perf_table(title: str, s: performance.PerformanceStats) -> str:
 
 
 @router.get("/performance", response_class=HTMLResponse)
-def performance_page(db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def performance_page(
+    db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     body = (
         _perf_table("All-time", performance.compute_stats(db))
         + _perf_table("Today", performance.daily_results(db))
@@ -424,7 +458,10 @@ def performance_page(db: Session = Depends(get_db), admin: AdminUser = Depends(r
 # Subscribers
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("/subscribers", response_class=HTMLResponse)
-def subscribers_list(db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def subscribers_list(
+    db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     subscribers = db.execute(select(Subscriber).order_by(Subscriber.created_at.desc()).limit(200)).scalars().all()
     rows = []
     for s in subscribers:
@@ -454,7 +491,10 @@ def subscribers_list(db: Session = Depends(get_db), admin: AdminUser = Depends(r
 # never does (see app/bot.py's module docstring).
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("/payments", response_class=HTMLResponse)
-def payments_list(db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def payments_list(
+    db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     payments = db.execute(select(Payment).order_by(Payment.created_at.desc()).limit(200)).scalars().all()
     rows = []
     for p in payments:
@@ -479,7 +519,10 @@ def payments_list(db: Session = Depends(get_db), admin: AdminUser = Depends(requ
 
 
 @router.post("/payments/{payment_id}/confirm")
-def confirm_payment_action(payment_id: str, db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def confirm_payment_action(
+    payment_id: str, db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_write_limit),
+):
     _require_write_role(admin)
     try:
         pid = uuid.UUID(payment_id)
@@ -502,7 +545,10 @@ def confirm_payment_action(payment_id: str, db: Session = Depends(get_db), admin
 # Plans
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("/plans", response_class=HTMLResponse)
-def plans_list(db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def plans_list(
+    db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     plans = db.execute(select(Plan).order_by(Plan.created_at)).scalars().all()
     rows = []
     for p in plans:
@@ -535,6 +581,7 @@ def create_plan_action(
     plan_id: str = Form(...), name: str = Form(...), duration_days: int = Form(...),
     price: float = Form(...), currency: str = Form("USD"),
     db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_write_limit),
 ):
     _require_write_role(admin)
     if duration_days <= 0 or price < 0:
@@ -552,7 +599,10 @@ def create_plan_action(
 
 
 @router.post("/plans/{plan_id}/toggle")
-def toggle_plan_action(plan_id: str, db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def toggle_plan_action(
+    plan_id: str, db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_write_limit),
+):
     _require_write_role(admin)
     try:
         pid = uuid.UUID(plan_id)
@@ -573,7 +623,10 @@ def toggle_plan_action(plan_id: str, db: Session = Depends(get_db), admin: Admin
 # channel config comes from environment (app/config.py), not this page.
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("/telegram", response_class=HTMLResponse)
-def telegram_page(db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def telegram_page(
+    db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     settings = get_settings()
     chats = db.execute(select(TelegramChat).order_by(TelegramChat.created_at)).scalars().all()
     chat_rows = "".join(
@@ -615,7 +668,10 @@ def telegram_page(db: Session = Depends(get_db), admin: AdminUser = Depends(requ
 # Audit logs
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("/audit", response_class=HTMLResponse)
-def audit_log_page(db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def audit_log_page(
+    db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     events = db.execute(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(300)).scalars().all()
     rows = "".join(
         f"<tr><td>{e.created_at.strftime('%Y-%m-%d %H:%M:%S')}</td><td>{esc(e.event_type)}</td>"
@@ -635,7 +691,10 @@ def audit_log_page(db: Session = Depends(get_db), admin: AdminUser = Depends(req
 # System health
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("/health", response_class=HTMLResponse)
-def system_health_page(db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin)):
+def system_health_page(
+    db: Session = Depends(get_db), admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     settings = get_settings()
 
     db_ok = True
@@ -675,7 +734,10 @@ def system_health_page(db: Session = Depends(get_db), admin: AdminUser = Depends
 # configured, matching System Health's pattern above.
 # ══════════════════════════════════════════════════════════════════════════
 @router.get("/settings", response_class=HTMLResponse)
-def settings_page(admin: AdminUser = Depends(require_admin)):
+def settings_page(
+    admin: AdminUser = Depends(require_admin),
+    _rl: None = Depends(_admin_read_limit),
+):
     settings = get_settings()
     rows = [
         ("ENV", settings.ENV), ("DEBUG", str(settings.DEBUG)),

@@ -8,6 +8,15 @@ psycopg[binary]>=3.1   # PostgreSQL driver for production; sqlite is stdlib
 argon2-cffi>=23.1       # admin password hashing (app/security.py)
 pyotp>=2.9              # admin TOTP 2FA (app/security.py)
 itsdangerous>=2.2       # signed admin session cookies (app/security.py)
+redis>=5.0               # optional: shared-state rate limiting across worker
+                          # processes when REDIS_URL is set (app/rate_limit.py).
+                          # Not required for single-worker deployments — the
+                          # in-memory backend is used automatically if this
+                          # package is present but REDIS_URL is unset, and the
+                          # app runs fine without Redis reachable at all in
+                          # that case. Only import site is app/rate_limit.py's
+                          # RedisRateLimitBackend, done lazily so nothing else
+                          # in the app hard-depends on it being installed.
 
 # dev/test only
 pytest>=8.0
